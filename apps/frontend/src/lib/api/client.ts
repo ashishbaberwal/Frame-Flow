@@ -8,7 +8,15 @@
 
 import type { Gallery, Photo, TeamMember } from "@/types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
+// A trailing slash in NEXT_PUBLIC_API_URL would produce "//api/..." paths
+// that the backend 404s — normalize once, here.
+const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/+$/, "");
+
+/** Prefix a backend-relative media path with the API origin. */
+export function resolveAssetUrl(url: string): string {
+  if (url.startsWith("/")) return `${API_URL}${url}`;
+  return url;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -29,16 +37,6 @@ interface RequestOptions {
 
 function buildUrl(path: string): string {
   return `${API_URL}/api/v1${path}`;
-}
-
-/**
- * Resolve a media URL returned by the API. Public-gallery photo URLs come
- * back as backend-relative paths (proxied bytes with a signed token); the
- * backend origin is prepended here. Absolute URLs pass through untouched.
- */
-export function resolveAssetUrl(url: string): string {
-  if (url.startsWith("/")) return `${API_URL}${url}`;
-  return url;
 }
 
 /** How long to wait for Clerk to produce a session token before giving up. */
