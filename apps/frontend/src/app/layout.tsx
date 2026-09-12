@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono, Fraunces } from "next/font/google";
 import { ClerkProvider } from "@clerk/nextjs";
 import { Toaster } from "sonner";
@@ -30,6 +30,10 @@ export const metadata: Metadata = {
   },
   description:
     "Upload together, curate fast, and deliver private, PIN-protected galleries your clients will love.",
+};
+
+export const viewport: Viewport = {
+  themeColor: "#faf9f6",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
