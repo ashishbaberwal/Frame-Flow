@@ -70,7 +70,8 @@ const createEventSchema = z.object({
   description: z.string().max(2000).optional(),
   location: z.string().max(200).optional(),
   event_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD"),
-  status: z.enum(["draft", "active", "completed"]).optional(),
+  // Deliberately no status: events are ALWAYS born draft. Status only ever
+  // changes through PATCH /events/:id, never at creation time.
 });
 
 const updateEventSchema = createEventSchema.partial();

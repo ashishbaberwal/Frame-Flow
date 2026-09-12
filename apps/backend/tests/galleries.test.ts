@@ -260,6 +260,15 @@ describeIf(hasDb)("Admin gallery workflow", () => {
     expect(res.status).toBe(404);
   });
 
+  it("events are always born draft — a client-sent status is ignored", async () => {
+    const res = await request(app)
+      .post("/api/v1/events")
+      .set(adminA)
+      .send({ name: `Gallery Ev Draft ${Date.now()}`, event_date: "2026-12-20", status: "completed" });
+    expect(res.status).toBe(201);
+    expect(res.body.event.status).toBe("draft");
+  });
+
   it("admin can set a custom PIN and it unlocks the gallery", async () => {
     const created = await request(app)
       .post(`/api/v1/events/${eventA1}/galleries`)

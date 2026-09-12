@@ -13,6 +13,7 @@ import {
   Sparkles,
   ArrowLeft,
   CheckCircle2,
+  ChevronDown,
   Copy,
   ExternalLink,
   KeyRound,
@@ -25,7 +26,7 @@ import { formatDate, formatNumber, timeAgo } from "@/lib/utils";
 import { api, ApiError, toGallery, toPhoto, toTeamMember } from "@/lib/api/client";
 import { useAuth } from "@clerk/nextjs";
 import { useCurrentUserState } from "@/lib/api/use-current-user";
-import type { Event, Gallery, Photo, TeamMember } from "@/types";
+import type { Event, EventStatus, Gallery, Photo, TeamMember } from "@/types";
 import { AppShell } from "@/components/dashboard/app-shell";
 import { EventStatusBadge, GalleryStatusBadge } from "@/components/dashboard/status-badge";
 import { EmptyState } from "@/components/dashboard/empty-state";
@@ -194,7 +195,15 @@ export default function EventDetailPage() {
           <div className="absolute bottom-4 left-4 right-4 text-white">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="font-display text-xl font-semibold tracking-tight sm:text-2xl">{event.name}</h1>
-              <EventStatusBadge status={event.status} />
+              {isAdmin ? (
+                <EventStatusControl
+                  event={event}
+                  token={getToken}
+                  onChange={(status) => setEvent({ ...event, status })}
+                />
+              ) : (
+                <EventStatusBadge status={event.status} />
+              )}
             </div>
             <p className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-sm text-white/85">
               <span className="inline-flex items-center gap-1.5">
@@ -475,8 +484,7 @@ export default function EventDetailPage() {
  * Per-gallery PIN controls: set a custom PIN, or regenerate a fresh
  * server-generated one. Admin-only surface — the backend re-checks role
  * and workspace on every call.
- */
-function GalleryPinMenu({
+ */function GalleryPinMenu({
   gallery,
   token,
   onChanged,
@@ -570,5 +578,73 @@ function GalleryPinMenu({
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+const EVENT_STATUSES: EventStatus[] = ["draft", "active", "completed"];
+
+/**
+ * Admin control for the event lifecycle. Events are always created draft;
+ * this is the only place status changes afterwards (the backend re-checks
+ * the admin role and workspace on the PATCH).
+ */
+function EventStatusControl({
+  event,
+  token,
+  onChange,
+}: {
+  event: Event;
+  token: (options?: { skipCache?: boolean }) => Promise<string | null>;
+  onChange: (status: EventStatus) => void;
+}) {
+  const [saving, setSaving] = React.useState(false);
+
+  async function update(status: EventStatus) {
+    if (status === event.status || saving) return;
+    setSaving(true);
+    try {
+      const t = await token();
+      await api.updateEvent(t, event.id, { status });
+      onChange(status);
+      toast.success(`Event marked ${status}`, {
+        description:
+          status === "active"
+            ? "It's live for the team and ready for delivery."
+            : status === "completed"
+              ? "Wrapped — the record stays in your archive."
+              : "It's back to draft while you prepare it.",
+      });
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Couldn't update the status");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          disabled={saving}
+          aria-label={`Change event status — currently ${event.status}`}
+          className="inline-flex cursor-pointer items-center gap-1 rounded-full transition-transform hover:scale-[1.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:cursor-wait disabled:opacity-70"
+        >
+          <EventStatusBadge status={event.status} />
+          <ChevronDown className="size-3.5 drop-shadow" aria-hidden="true" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">
+        {EVENT_STATUSES.map((s) => (
+          <DropdownMenuItem key={s} onSelect={() => void update(s)} className="capitalize">
+            <CheckCircle2
+              className={s === event.status ? "size-4" : "size-4 opacity-0"}
+              aria-hidden="true"
+            />
+            {s}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
