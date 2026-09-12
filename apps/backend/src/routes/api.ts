@@ -846,6 +846,11 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
         "Content-Length": String(bytes.byteLength),
         "Cache-Control": "private, max-age=3600",
         "Content-Disposition": `${req.query.dl === "1" ? "attachment" : "inline"}; filename="${safeName}"`,
+        // helmet defaults this to `same-origin`, which makes browsers refuse
+        // to embed these bytes on the (different-origin) frontend. Serving
+        // cross-origin <img>s is this endpoint's whole job — opt out here,
+        // scoped to this route only.
+        "Cross-Origin-Resource-Policy": "cross-origin",
       });
       res.send(bytes);
     } catch (err) {
