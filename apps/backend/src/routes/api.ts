@@ -12,10 +12,13 @@ import {
   deleteEvent,
   deletePhoto,
   getEventById,
+  getDashboardStats,
   getGalleryById,
   getPendingInvitationByEmail,
   getPhotoById,
   getPublishedGalleryBySlug,
+  getRecentActivity,
+  getUploadsPerDay,
   getUserByClerkId,
   getUserById,
   getWorkspaceEvent,
@@ -149,6 +152,39 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       email: user.email,
       name: user.name,
       role: user.role,
+    });
+  }) as unknown as import("express").RequestHandler);
+
+  /**
+   * Real aggregates for the dashboard overview. Admins see the workspace;
+   * team members see only their assigned events, and people-counts are
+   * withheld (null) so the client can hide those cards.
+   */
+  router.get("/stats", (async (req: Request, res: Response) => {
+    const user = await resolveAppUser(env, req);
+    const memberScope = user.role === "ADMIN" ? undefined : user.id;
+    const [stats, uploadsPerDay, activity] = await Promise.all([
+      getDashboardStats(env, user.workspace_id, memberScope),
+      getUploadsPerDay(env, user.workspace_id, memberScope, 14),
+      getRecentActivity(env, user.workspace_id, memberScope, 8),
+    ]);
+    res.json({
+      stats: {
+        events: stats.events,
+        active_events: stats.active_events,
+        photos: stats.photos,
+        published_galleries: stats.published_galleries,
+        team_members: memberScope ? null : stats.team_members,
+        pending_invites: memberScope ? null : stats.pending_invites,
+      },
+      uploads_per_day: uploadsPerDay,
+      recent_activity: activity.map((a) => ({
+        type: a.type,
+        actor_name: a.actor_name ?? "Someone",
+        title: a.title,
+        detail: a.detail,
+        at: new Date(a.at).toISOString(),
+      })),
     });
   }) as unknown as import("express").RequestHandler);
 

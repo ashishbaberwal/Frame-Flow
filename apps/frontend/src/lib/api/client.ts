@@ -186,6 +186,28 @@ export const api = {
       token,
     }),
 
+  // ---- Dashboard stats ----
+  stats: (token: string | null) =>
+    apiFetch<{
+      stats: {
+        events: number;
+        active_events: number;
+        photos: number;
+        published_galleries: number;
+        /** null for team members — the UI hides people-cards for them. */
+        team_members: number | null;
+        pending_invites: number | null;
+      };
+      uploads_per_day: { day: string; uploads: number }[];
+      recent_activity: {
+        type: "photo_uploaded" | "gallery_published" | "event_created";
+        actor_name: string;
+        title: string;
+        detail: string;
+        at: string;
+      }[];
+    }>("/stats", { token }),
+
   // ---- Public gallery (customer surface — no Clerk token, PIN-verified server-side) ----
   getPublicGallery: (slug: string) =>
     apiFetch<{ gallery: PublicGalleryApi }>(`/public/galleries/${encodeURIComponent(slug)}`),

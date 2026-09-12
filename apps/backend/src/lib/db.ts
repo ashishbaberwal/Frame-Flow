@@ -778,3 +778,129 @@ export async function listEventMembers(
     },
   }));
 }
+
+// ---------------------------------------------------------------------------
+// Dashboard stats — real aggregates for the overview page. Admins see the
+// whole workspace; passing memberUserId scopes events/photos/galleries to
+// the events that member is assigned to. Counts are ::int so JSON numbers
+// come back as numbers, not Postgres bigint strings.
+// ---------------------------------------------------------------------------
+
+export type DashboardStats = {
+  events: number;
+  active_events: number;
+  photos: number;
+  published_galleries: number;
+  team_members: number;
+  pending_invites: number;
+};
+
+function activityScope(memberUserId?: string): { sql: string; params: unknown[] } {
+  if (!memberUserId) return { sql: "", params: [] };
+  return {
+    sql: "AND e.id IN (SELECT event_id FROM event_team_members WHERE user_id = $2)",
+    params: [memberUserId],
+  };
+}
+
+export async function getDashboardStats(
+  env: Env,
+  workspaceId: string,
+  memberUserId?: string
+): Promise<DashboardStats> {
+  const { sql: scope } = activityScope(memberUserId);
+  const result = await getPool(env).query<DashboardStats>(
+    `SELECT
+       (SELECT COUNT(*)::int FROM events e
+        WHERE e.workspace_id = $1 ${scope}) AS events,
+       (SELECT COUNT(*)::int FROM events e
+        WHERE e.workspace_id = $1 AND e.status = 'active' ${scope}) AS active_events,
+       (SELECT COUNT(*)::int FROM photos p JOIN events e ON e.id = p.event_id
+        WHERE e.workspace_id = $1 ${scope}) AS photos,
+       (SELECT COUNT(*)::int FROM galleries g JOIN events e ON e.id = g.event_id
+        WHERE e.workspace_id = $1 AND g.status = 'published' ${scope}) AS published_galleries,
+       (SELECT COUNT(*)::int FROM users WHERE workspace_id = $1
+         ${memberUserId ? "AND FALSE" : ""}) AS team_members,
+       (SELECT COUNT(*)::int FROM invitations WHERE workspace_id = $1 AND status = 'pending'
+         ${memberUserId ? "AND FALSE" : ""}) AS pending_invites`,
+    memberUserId ? [workspaceId, memberUserId] : [workspaceId]
+  );
+  return result.rows[0]!;
+}
+
+/** Daily upload counts for the last `days` days — zero-filled. */
+export async function getUploadsPerDay(
+  env: Env,
+  workspaceId: string,
+  memberUserId: string | undefined,
+  days = 14
+): Promise<{ day: string; uploads: number }[]> {
+  const { sql: scope, params: scopeParams } = activityScope(memberUserId);
+  const result = await getPool(env).query<{ day: string; uploads: number }>(
+    `SELECT to_char(d.day, 'YYYY-MM-DD') AS day, COALESCE(c.uploads, 0)::int AS uploads
+     FROM generate_series(CURRENT_DATE - ($${scopeParams.length + 2}::int - 1), CURRENT_DATE, interval '1 day') AS d(day)
+     LEFT JOIN (
+       SELECT date_trunc('day', p.created_at) AS day, COUNT(*)::int AS uploads
+       FROM photos p JOIN events e ON e.id = p.event_id
+       WHERE e.workspace_id = $1 AND p.created_at >= CURRENT_DATE - ($${scopeParams.length + 2}::int - 1) ${scope}
+       GROUP BY 1
+     ) c ON c.day = d.day
+     ORDER BY d.day`,
+    [workspaceId, ...scopeParams, days]
+  );
+  return result.rows;
+}
+
+export type DashboardActivityRow = {
+  type: "photo_uploaded" | "gallery_published" | "event_created";
+  actor_name: string | null;
+  title: string;
+  detail: string;
+  at: Date;
+};
+
+/** Newest activity across photos, gallery publishes, and event creation. */
+export async function getRecentActivity(
+  env: Env,
+  workspaceId: string,
+  memberUserId: string | undefined,
+  limit = 8
+): Promise<DashboardActivityRow[]> {
+  const { sql: scope, params: scopeParams } = activityScope(memberUserId);
+  const result = await getPool(env).query<DashboardActivityRow>(
+    `SELECT * FROM (
+       (SELECT 'photo_uploaded'::text AS type,
+               COALESCE(NULLIF(u.name, ''), u.email) AS actor_name,
+               p.filename AS title,
+               'uploaded to ' || e.name AS detail,
+               p.created_at AS at
+        FROM photos p
+        JOIN events e ON e.id = p.event_id
+        LEFT JOIN users u ON u.id = p.uploaded_by
+        WHERE e.workspace_id = $1 ${scope})
+       UNION ALL
+       (SELECT 'gallery_published'::text AS type,
+               COALESCE(NULLIF(a.name, ''), a.email) AS actor_name,
+               g.name AS title,
+               'published the gallery · ' || e.name AS detail,
+               g.published_at AS at
+        FROM galleries g
+        JOIN events e ON e.id = g.event_id
+        LEFT JOIN users a ON a.id = g.created_by
+        WHERE e.workspace_id = $1 AND g.published_at IS NOT NULL ${scope})
+       UNION ALL
+       (SELECT 'event_created'::text AS type,
+               COALESCE(NULLIF(c.name, ''), c.email) AS actor_name,
+               e.name AS title,
+               'created the event' AS detail,
+               e.created_at AS at
+        FROM events e
+        LEFT JOIN users c ON c.id = e.created_by
+        WHERE e.workspace_id = $1 ${scope})
+     ) activity
+     ORDER BY at DESC
+     LIMIT $${scopeParams.length + 2}`,
+    [workspaceId, ...scopeParams, limit]
+  );
+  return result.rows;
+}

@@ -4,7 +4,7 @@ import * as React from "react";
 import { Aperture, LayoutGrid, List, Plus, Search } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 
-import { cn } from "@/lib/utils";
+import { cn, coverFor } from "@/lib/utils";
 import { api, ApiError } from "@/lib/api/client";
 import { useCurrentUserState } from "@/lib/api/use-current-user";
 import type { Event, EventStatus } from "@/types";
@@ -25,26 +25,6 @@ const STATUS_FILTERS: { value: EventStatus | "all"; label: string }[] = [
   { value: "completed", label: "Completed" },
   { value: "draft", label: "Draft" },
 ];
-
-/*
- * Cover placeholders until custom covers exist — picked by a stable hash of
- * the event id so a card's photograph never shuffles when the list is
- * filtered or reordered.
- */
-const COVERS = [
-  "https://images.unsplash.com/photo-1519741497674-611481863552?auto=format&fit=crop&w=900&h=600&q=80",
-  "https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&w=900&h=600&q=80",
-  "https://images.unsplash.com/photo-1470229722913-7c0e2dbbafd3?auto=format&fit=crop&w=900&h=600&q=80",
-  "https://images.unsplash.com/photo-1511285560929-80b456fea0bc?auto=format&fit=crop&w=900&h=600&q=80",
-  "https://images.unsplash.com/photo-1519225421980-715cb0215aed?auto=format&fit=crop&w=900&h=600&q=80",
-  "https://images.unsplash.com/photo-1465495976277-4387d4b0b4c6?auto=format&fit=crop&w=900&h=600&q=80",
-];
-
-function coverFor(id: string): string {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return COVERS[h % COVERS.length]!;
-}
 
 export default function EventsPage() {
   const { user } = useCurrentUserState();
