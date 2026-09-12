@@ -27,10 +27,10 @@ export function Logo({ className, href = "/" }: { className?: string; href?: str
         className="shrink-0"
         suppressHydrationWarning
       >
-        <rect x="2.5" y="2.5" width="19" height="19" rx="3" className="fill-foreground" />
+        <rect x="2.5" y="2.5" width="19" height="19" rx="3" className="fill-foreground" suppressHydrationWarning />
         <path
           d="M8.5 12.2l2.4 2.9 4.8-6"
-          stroke="var(--background)"
+          className="stroke-background"
           strokeWidth="2.2"
           strokeLinecap="round"
           strokeLinejoin="round"
