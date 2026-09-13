@@ -14,7 +14,6 @@
   },
   "dependencies": {
     "@clerk/backend": "^3.17.1",
-    "@types/multer": "^2.2.0",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
@@ -30,6 +29,7 @@
     "@types/compression": "^1.8.1",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
+    "@types/multer": "^2.2.0",
     "@types/node": "^24",
     "@types/pg": "^8.15.6",
     "@types/supertest": "^6.0.3",

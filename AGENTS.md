@@ -150,6 +150,7 @@ Rules:
   - `GET /health` — liveness (public)
   - `GET /api/v1/health` — liveness + DB check (public; 503 when degraded)
   - `GET /api/v1/me` — verified Clerk identity + app role (401 without token)
+  - `GET /api/v1/stats` — dashboard aggregates; admins see the workspace, members only assigned events
   - `/api/v1/team-members` (+ `invite`, `:id/role`, `:id`) — workspace team management (ADMIN)
   - `/api/v1/events` CRUD — workspace-scoped; members see only assigned events (403)
   - `/api/v1/events/:id/team-members` — event assignment (ADMIN writes, members read)

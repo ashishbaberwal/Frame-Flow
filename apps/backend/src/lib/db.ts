@@ -592,7 +592,6 @@ export async function createEvent(
   return result.rows[0]!;
 }
 
-/** All events in a workspace, newest first. */
 /** Every event read selects photo_count so the UI never hardcodes a count. */
 const EVENT_COLUMNS = `e.*, (SELECT COUNT(*) FROM photos p WHERE p.event_id = e.id) AS photo_count`;
 
@@ -779,12 +778,9 @@ export async function listEventMembers(
   }));
 }
 
-// ---------------------------------------------------------------------------
-// Dashboard stats — real aggregates for the overview page. Admins see the
-// whole workspace; passing memberUserId scopes events/photos/galleries to
-// the events that member is assigned to. Counts are ::int so JSON numbers
-// come back as numbers, not Postgres bigint strings.
-// ---------------------------------------------------------------------------
+// Dashboard stats — workspace-level for admins; passing memberUserId scopes
+// everything to that member's assigned events. Counts are ::int so JSON
+// numbers survive the pg driver.
 
 export type DashboardStats = {
   events: number;

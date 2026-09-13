@@ -105,7 +105,6 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
 }
 
 export const api = {
-  health: () => fetch(`${API_URL}/health`).then((r) => r.json() as Promise<{ status: string }>),
   me: (token: string | null) => apiFetch<{ id: string; email: string; name: string; role: string }>("/me", { token }),
 
   // ---- Team management (ADMIN, workspace-scoped) ----

@@ -75,15 +75,6 @@ export interface Gallery {
   downloadEnabled: boolean;
 }
 
-export interface ActivityItem {
-  id: string;
-  actorName: string;
-  action: string;
-  target: string;
-  timestamp: string;
-  type: "upload" | "publish" | "join" | "create" | "select";
-}
-
 export interface UploadItem {
   id: string;
   file: File;

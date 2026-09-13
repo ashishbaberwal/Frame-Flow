@@ -11,7 +11,6 @@ import {
   createInvitation,
   deleteEvent,
   deletePhoto,
-  getEventById,
   getDashboardStats,
   getGalleryById,
   getPendingInvitationByEmail,
@@ -218,7 +217,6 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     const { name, email } = parsed.data;
     const actor = await resolveAppUser(env, req);
 
-    // Already in this workspace? Nothing to do.
     const workspaceUsers = await listWorkspaceUsers(env, actor.workspace_id);
     const existingMember = workspaceUsers.find(
       (u) => u.email.toLowerCase() === email.toLowerCase()
@@ -465,7 +463,6 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
           return;
         }
         try {
-          // 1. Binary → Appwrite (safe UUID storage key, filename is metadata).
           const stored = await uploadPhoto(env, file.buffer, file.mimetype, file.originalname);
           try {
             // 2. Metadata → Postgres. uploaded_by is ALWAYS the authenticated
@@ -480,7 +477,6 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
             });
             uploaded.push(serializePhoto(photo, env));
           } catch (metaErr) {
-            // Metadata failed → clean up the orphaned Appwrite object.
             await deletePhotoQuietly(env, stored.storageFileId);
             throw metaErr;
           }
@@ -624,7 +620,6 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       return;
     }
 
-    // Selected photos must exist AND belong to this event.
     const photoIds = parsed.data.photo_ids;
     if (photoIds.length === 0) {
       res.status(400).json({ error: "Select at least one photo" });

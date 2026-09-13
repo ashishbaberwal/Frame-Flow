@@ -117,6 +117,7 @@ All application endpoints live under `/api/v1`. Errors are always
 | --- | --- | --- |
 | Health | `GET /health`, `GET /api/v1/health` | public |
 | Identity | `GET /api/v1/me` | authenticated |
+| Dashboard | `GET /api/v1/stats` — counts, 14-day upload series, activity feed | authed (role-scoped) |
 | Team | `GET/POST /api/v1/team-members`, `POST …/invite`, `PATCH …/:id/role`, `DELETE …/:id` | ADMIN |
 | Events | `GET/POST /api/v1/events`, `GET/PATCH/DELETE /api/v1/events/:id` | authed (writes ADMIN) |
 | Event team | `GET/POST/DELETE /api/v1/events/:id/team-members` | read authed, writes ADMIN |
@@ -178,8 +179,8 @@ real values are never committed.
 bun run test   # = turbo test → backend vitest
 ```
 
-54 integration tests across five suites (`api`, `authorization`, `photos`,
-`galleries`, `public-gallery`). Clerk verification and Appwrite are mocked at
+60 integration tests across six suites (`api`, `authorization`, `photos`,
+`galleries`, `public-gallery`, `stats`). Clerk verification and Appwrite are mocked at
 the boundary; **Postgres is real** — authorization, tenancy, and workflows are
 exercised end-to-end:
 
@@ -231,8 +232,9 @@ is part of the app's design; members join via email invitation):
   need a shared store.
 - No thumbnails/resizing or pagination yet (photo lists are full-list fetches;
   fine at demo scale, flagged for scale work).
-- The dashboard overview page still renders sample stats — events/events detail/
-  team/galleries and the entire customer gallery run on the real API.
+- The dashboard's upload chart shows the last 14 days only (no longer-range
+  analytics); events detail, team, galleries and the customer gallery run on
+  the real API.
 
 ## Repository notes
 

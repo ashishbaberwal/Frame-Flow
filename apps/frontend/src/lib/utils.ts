@@ -43,16 +43,6 @@ export function timeAgo(date: Date | string) {
   return "just now";
 }
 
-export function getInitials(name: string) {
-  return name
-    .split(" ")
-    .map((part) => part[0])
-    .filter(Boolean)
-    .slice(0, 2)
-    .join("")
-    .toUpperCase();
-}
-
 /*
  * Cover placeholders until custom covers exist — picked by a stable hash of
  * the resource id so a card's photograph never shuffles when lists are
