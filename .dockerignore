@@ -1,0 +1,45 @@
+# Root build context for the Docker builds (the repo root is the context —
+# see apps/backend/Dockerfile). Keeps the context small and, critically, keeps
+# local secret files out of it: without this, `COPY . .`-style steps and the
+# build cache could capture .env.local values.
+
+# Dependencies — reinstalled inside the image from the frozen lockfile.
+node_modules
+**/node_modules
+
+# Build output — produced inside the image.
+dist
+**/dist
+.next
+**/.next
+out
+**/out
+build
+**/build
+*.tsbuildinfo
+
+# Local env files — NEVER send these to the daemon.
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# VCS and agent/dev artifacts.
+.git
+.gitignore
+.claude
+.playwright-cli
+**/.playwright-cli
+.gstack
+.turbo
+**/.turbo
+coverage
+**/coverage
+
+# Docs and misc noise.
+**/*.md
+.DS_Store
+**/.DS_Store
+*.log

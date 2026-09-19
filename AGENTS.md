@@ -67,29 +67,35 @@ cd apps/backend && bun run test   # vitest for the backend
 
 ### Docker
 
-```sh
-docker build -t frameflow-backend  apps/backend
-docker build -t frameflow-frontend apps/frontend
+**Only the backend is containerized.** The frontend is deployed separately
+(e.g. Vercel), so `apps/frontend/Dockerfile` and its `.dockerignore` were
+removed. Clerk, Supabase and Appwrite are external managed services — never
+containerize them.
 
-# Run both with a shared network (backend env from apps/backend/.env.local):
-docker network create ffnet
-docker run -d --name ff-backend  --network ffnet \
+The build context is the **repository root**, not `apps/backend`, because
+`bun.lock` and the workspace layout live at the root:
+
+```sh
+docker build -f apps/backend/Dockerfile -t frameflow-backend .
+
+docker run -d --name ff-backend \
   --env-file apps/backend/.env.local -e NODE_ENV=production -p 4000:4000 \
   frameflow-backend
-docker run -d --name ff-frontend --network ffnet \
-  -e NEXT_PUBLIC_API_URL=http://ff-backend:4000 -p 3000:3000 \
-  frameflow-frontend
 ```
 
-> **Known broken (do not trust this runbook yet):** `NEXT_PUBLIC_*` vars are
-> inlined at *build* time, so `-e NEXT_PUBLIC_API_URL=...` at `docker run`
-> cannot work — the frontend image needs it as a build arg. The backend image
-> also has an open ESM/CJS mismatch in its Dockerfile. Fix the Dockerfiles
-> before using Docker for anything real.
+Notes on the image:
+- Bun installs dependencies into a root-level store (`node_modules/.bun/`) and
+  leaves symlinks in `apps/backend/node_modules`. The runtime stage copies
+  **both** halves, or every import resolves to a dangling link.
+- The compiled output is ESM, so `package.json` keeps `"type": "module"`. An
+  earlier revision stripped it and the container crashed with `ERR_REQUIRE_ESM`.
+- `prod-ca-2021.crt` is copied in; `db.ts` requires `DATABASE_SSL_CA` whenever
+  `NODE_ENV=production` and the database is not localhost.
+- Runtime deps only — no `tsc`/`eslint`/`vitest`/`tsx` in the shipped image.
+- Runs as the non-root `app` user, has a `HEALTHCHECK` on `/health`, and uses
+  exec-form `CMD` so SIGTERM reaches PID 1 and the graceful shutdown runs.
 
-Only `frontend` and `backend` are Dockerized. Clerk, Supabase and Appwrite are
-external managed services — never containerize them. Never hardcode
-`localhost` into production Docker configuration.
+Never hardcode `localhost` into production Docker configuration.
 
 ## Environment Variables
 
