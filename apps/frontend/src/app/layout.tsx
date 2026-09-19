@@ -44,7 +44,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       suppressHydrationWarning
     >
       <body className="min-h-full flex flex-col">
-        <ClerkProvider>
+        <ClerkProvider proxyUrl="/__clerk">
           <MotionProvider>
             <ThemeProvider>{children}</ThemeProvider>
             <Toaster position="bottom-right" />

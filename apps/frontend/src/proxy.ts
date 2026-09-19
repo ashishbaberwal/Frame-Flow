@@ -13,7 +13,7 @@ export default clerkMiddleware(
     // Next.js proxy path. Without this option, /__clerk/* returns 404 and the
     // SignIn/SignUp components remain blank even when the publishable key is
     // present in the Vercel build.
-    frontendApiProxy: { enabled: true },
+    frontendApiProxy: { enabled: true, path: "/__clerk" },
   },
 );
 
@@ -25,5 +25,6 @@ export const config = {
     "/(api|trpc)(.*)",
     // Always run for Clerk's Frontend API proxy.
     "/__clerk/(.*)",
+    "/__clerk/:path*",
   ],
 };
