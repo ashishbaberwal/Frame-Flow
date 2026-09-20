@@ -76,7 +76,11 @@ export function EventTeamPanel({ eventId, isAdmin }: { eventId: string; isAdmin:
       const data = await api.listMembers(token);
       // Only offer active (non-pending) members not already on this event.
       const assigned = new Set((members ?? []).map((m) => m.id));
-      setCandidates(data.members.filter((m) => !m.pending && !assigned.has(m.id)));
+      setCandidates(
+        data.members.filter(
+          (m) => m.role === "TEAM_MEMBER" && !m.pending && !assigned.has(m.id)
+        )
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to load members");
       setAssignOpen(false);
@@ -180,7 +184,7 @@ export function EventTeamPanel({ eventId, isAdmin }: { eventId: string; isAdmin:
           </DialogHeader>
           {candidates.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No available members. Invite new members from the Team page first.
+              No active team members available. Add and activate members from the Team page first.
             </p>
           ) : (
             <div className="grid gap-1.5">

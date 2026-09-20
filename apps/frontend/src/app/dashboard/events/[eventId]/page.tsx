@@ -53,7 +53,6 @@ import {
 import { UploadModal } from "@/components/photos/upload-modal";
 import { PhotoCard } from "@/components/photos/photo-card";
 import { CreateGalleryWizard } from "@/components/galleries/create-gallery-wizard";
-import { AddMemberModal } from "@/components/team/add-member-modal";
 import { EventTeamPanel } from "@/components/team/event-team-panel";
 
 export default function EventDetailPage() {
@@ -68,7 +67,7 @@ export default function EventDetailPage() {
   const [galleries, setGalleries] = React.useState<Gallery[]>([]);
   const [photos, setPhotos] = React.useState<Photo[]>([]);
   const [uploadOpen, setUploadOpen] = React.useState(false);
-  const [memberOpen, setMemberOpen] = React.useState(false);
+  const [activeTab, setActiveTab] = React.useState("overview");
   const [wizardOpen, setWizardOpen] = React.useState(false);
 
   // Refetchable so an upload can refresh photos AND the count in place.
@@ -221,15 +220,17 @@ export default function EventDetailPage() {
           <Button onClick={() => setUploadOpen(true)}>
             <Upload /> Upload photos
           </Button>
-          <Button variant="outline" onClick={() => setMemberOpen(true)}>
-            <UserPlus /> Manage team
-          </Button>
+          {isAdmin && (
+            <Button variant="outline" onClick={() => setActiveTab("team")}>
+              <UserPlus /> Assign team
+            </Button>
+          )}
           <Button variant="outline" onClick={() => setWizardOpen(true)}>
             <Sparkles /> Create gallery
           </Button>
         </div>
 
-        <Tabs defaultValue="overview" className="mt-6">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-6">
           <TabsList className="w-full justify-start overflow-x-auto no-scrollbar sm:w-auto">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="photos">Photos</TabsTrigger>
@@ -457,13 +458,6 @@ export default function EventDetailPage() {
           void load();
         }}
       />
-      <AddMemberModal
-        open={memberOpen}
-        onOpenChange={setMemberOpen}
-        eventId={event.id}
-        onInvited={() => void load()}
-      />
-
       {/* Gallery wizard lives here too, so publishing from this page shows up
           in the Galleries tab without a trip to the photo workspace. */}
       {isAdmin && (

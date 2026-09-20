@@ -344,6 +344,9 @@ describeIf(hasDb)("Phase 2 authorization", () => {
 
     const after = await request(app).get(`/api/v1/events/${eventId}`).set(memberAuth);
     expect(after.status).toBe(200);
+    const assignedEvents = await request(app).get("/api/v1/events").set(memberAuth);
+    expect(assignedEvents.status).toBe(200);
+    expect(assignedEvents.body.events.some((e: { id: string }) => e.id === eventId)).toBe(true);
   });
 
   it("admin can remove member from event; access is revoked", async () => {
