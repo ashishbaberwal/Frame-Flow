@@ -1,4 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect x="4" y="4" width="56" height="56" rx="14" fill="#1c1917"/>
-  <path d="M21 32l7 8.5L43 23" stroke="#faf9f6" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>FrameFlow</title>
+  <rect width="512" height="512" rx="112" fill="#171717"/>
+  <path d="M128 184V144C128 121.909 145.909 104 168 104H208" stroke="#F8F6F1" stroke-width="28" stroke-linecap="round"/>
+  <path d="M384 184V144C384 121.909 366.091 104 344 104H304" stroke="#F8F6F1" stroke-width="28" stroke-linecap="round"/>
+  <path d="M128 328V368C128 390.091 145.909 408 168 408H208" stroke="#F8F6F1" stroke-width="28" stroke-linecap="round"/>
+  <path d="M384 328V368C384 390.091 366.091 408 344 408H304" stroke="#F8F6F1" stroke-width="28" stroke-linecap="round"/>
+  <path d="M136 248C181 193 227 193 268 246C311 299 352 297 392 240" stroke="#D88B70" stroke-width="28" stroke-linecap="round"/>
+  <circle cx="264" cy="158" r="24" fill="#F8F6F1"/>
 </svg>
