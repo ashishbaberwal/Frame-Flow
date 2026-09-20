@@ -1,244 +1,396 @@
 # FrameFlow
 
-A full-stack photo-sharing platform for photography and event teams: admins
-create events and manage the team, members upload photos collaboratively, and
-the admin curates and publishes a PIN-protected gallery that clients open
-through a shareable link — no account required.
+FrameFlow is a photo-sharing platform for photography and event teams. An
+admin creates an event, adds team members, receives their uploads, selects the
+photos for delivery, and publishes a PIN-protected gallery for the customer.
 
-Built for the **TrizenAI Full-Stack Internship Challenge**.
+Customers do not need an account. They receive a gallery link and a six-digit
+PIN, then view the published photos through the public gallery route.
 
----
+Built for the TrizenAI full-stack internship challenge.
 
-## Table of contents
+## Live deployment
 
-- [Features](#features)
-- [Technology stack](#technology-stack)
-- [Architecture](#architecture)
-- [Database design](#database-design)
-- [API surface](#api-surface)
-- [Security model](#security-model)
-- [Local setup](#local-setup)
-- [Environment variables](#environment-variables)
-- [Tests](#tests)
-- [Deployment](#deployment)
-- [Demo credentials](#demo-credentials)
-- [Known limitations](#known-limitations)
+- Frontend: https://trizen-ai-frontend.vercel.app
+- Backend health: https://trizen-ai.onrender.com/health
+- API health: https://trizen-ai.onrender.com/api/v1/health
 
-## Features
+The frontend is deployed on Vercel. The backend is packaged as a Docker image
+and deployed as a Render web service.
 
-**Admin / Lead**
-- Register / login (Clerk)
-- Create and manage events (draft / active / completed)
-- Invite team members by email (role is stamped at invite time)
-- View every photo the team uploaded, with uploader attribution
-- Multi-select photos, curate, and publish client galleries
-- Gallery PIN is generated server-side — or set a custom one / regenerate at any time
-- Shareable gallery URL (`/gallery/<slug>`) + 6-digit PIN
+## Product workflow
 
-**Team Member**
-- Login; sees **only** events they're assigned to (403 otherwise)
-- Uploads photos in batches (up to 20 × 25 MB, JPEG/PNG/WebP) with progress
-- Cannot publish galleries, manage users, or delete others' photos
+1. An admin registers and signs in through Clerk.
+2. The admin creates an event. New events start in `draft` status.
+3. The admin adds a team member from the Team page.
+4. The team member registers with the invited email and becomes a
+   `TEAM_MEMBER` in the admin's workspace.
+5. The admin opens the event's Team tab and assigns an active team member from
+   the workspace member selector.
+6. The team member sees the assigned event and uploads photos to it.
+7. The admin sees all event photos, selects the photos for delivery, and creates
+   a gallery.
+8. The admin publishes the gallery and shares its URL and six-digit PIN.
+9. The customer opens the URL, enters the PIN, and browses the published
+   gallery without signing in.
 
-**Customer**
-- Opens the gallery link, enters the 6-digit PIN — no signup
-- Browses photos in an editorial gallery view; downloads individual photos
-- Brute-force protection: 5 wrong PINs per gallery+IP per 15 minutes
+If Clerk production email delivery is not configured with a verified sending
+domain, the admin can create a pending member and share the registration URL
+manually. The member must use the exact email entered by the admin.
+
+## Roles and permissions
+
+### Admin / Lead
+
+Admins can create, edit, delete, and change event status; manage workspace team
+members; assign members to events; view every photo in their workspace events;
+curate photos; create and publish galleries; set or regenerate gallery PINs;
+and share customer gallery URLs.
+
+Event statuses are `draft`, `active`, and `completed`. Gallery status is
+separate and uses `draft` and `published`.
+
+### Team Member
+
+Team members can sign in, view assigned events, upload photos, and view only
+their own uploaded photos in those events. They cannot manage users, assign
+members, view galleries, curate photos, create galleries, publish galleries,
+or delete photos.
+
+### Customer
+
+Customers have no application account. They open a shared gallery URL, enter
+the six-digit PIN, browse published photos, and download individual photos.
 
 ## Technology stack
 
-| Layer | Choice | Why |
-| --- | --- | --- |
-| Frontend | Next.js 16 (App Router), React 19, Tailwind 4, Radix primitives, Motion | Server components + file-based routing; accessible headless UI; purposeful animation |
-| Auth | Clerk | Session/token management done right; backend verifies every token |
-| API | Express 5 + TypeScript on Node 24 | Typed, small, explicit API layer — all business logic lives here |
-| Database | PostgreSQL (Supabase) | Relational fits the domain (workspaces → events → photos/galleries); versioned SQL migrations |
-| Object storage | Appwrite Storage | Binaries never touch the database or disk; UUID storage keys, server-side API key only |
-| Tests | Vitest + Supertest | Real-Postgres integration tests; Clerk/Appwrite mocked at the boundary |
-| CI | GitHub Actions (+ Turborepo) | Lint, type-check, tests against a real Postgres, production build on every PR |
-| Monorepo | Turbo + Bun | One lockfile, cached builds across `apps/*` |
+| Layer            | Technology                           | Responsibility                                      |
+| ---------------- | ------------------------------------ | --------------------------------------------------- |
+| Frontend         | Next.js 16, React 19, Tailwind CSS 4 | Dashboard, upload, gallery and customer UI          |
+| Authentication   | Clerk                                | Sign-in, sign-up, sessions and invitations          |
+| Backend          | Express 5, TypeScript, Node.js 24    | API, authorization, validation and business rules   |
+| Database         | Supabase PostgreSQL                  | Users, workspaces, events, assignments and metadata |
+| File storage     | Appwrite Storage                     | Photo binaries only                                 |
+| Testing          | Vitest, Supertest                    | API, authorization and workflow tests               |
+| Monorepo         | Turborepo, Bun                       | Workspace scripts, dependencies and builds          |
+| Frontend hosting | Vercel                               | Next.js production deployment                       |
+| Backend hosting  | Render                               | Dockerized Express production service               |
 
 ## Architecture
 
-Three managed services, one rule each: **Clerk = identity, Supabase = metadata,
-Appwrite = binaries.** All application logic lives in the Express API — Next.js
-never talks to the database.
-
-```
+```text
 Browser
-   │  (Clerk session token in Authorization header)
-   ▼
-Next.js 16 :3000 ──proxy.ts route protection──▶ Express 5 :4000
-                                                 │ verifyToken (Clerk backend SDK)
-                                                 ├─▶ Clerk      identity + invitations
-                                                 ├─▶ PostgreSQL metadata (service role)
-                                                 └─▶ Appwrite   photo binaries
+   |
+   | Clerk session token in Authorization header
+   v
+Vercel - Next.js frontend
+   |
+   | HTTPS API requests
+   v
+Render - Dockerized Express backend
+   |\
+   | \-- Clerk Backend SDK: identity and invitations
+   |\
+   |  \- Supabase PostgreSQL: application metadata
+   |\
+   \---- Appwrite Storage: photo binaries
 ```
 
-Request flow for the customer gallery (no account):
+The browser never connects directly to PostgreSQL or Appwrite using server
+credentials. Frontend requests go through
+`apps/frontend/src/lib/api/client.ts`. The backend verifies the Clerk bearer
+token and derives the user, role, and workspace from trusted server-side data.
 
+### Authenticated request flow
+
+1. Clerk creates the browser session.
+2. The frontend obtains a Clerk session token.
+3. The token is sent as `Authorization: Bearer <token>`.
+4. Express verifies the token with `@clerk/backend`.
+5. The backend resolves the application user and role from PostgreSQL.
+6. Workspace and event membership checks run before protected operations.
+
+### Public gallery flow
+
+```text
+GET  /api/v1/public/galleries/:slug
+POST /api/v1/public/galleries/:slug/unlock  { pin }
+GET  /api/v1/public/galleries/:slug/photos/:photoId?st=<token>
 ```
-GET /api/v1/public/galleries/<slug>            → published-gallery metadata (PIN screen)
-POST /api/v1/public/galleries/<slug>/unlock    → { pin } verified server-side (timing-safe),
-                                                 returns signed access token + photo list
-GET /api/v1/public/galleries/<slug>/photos/:id?st=<token>
-                                               → image bytes proxied from Appwrite
-```
+
+The PIN is checked server-side. A successful unlock creates a short-lived,
+gallery-bound signed token. Photo bytes are proxied from Appwrite through the
+backend.
 
 ## Database design
 
-Five versioned migrations (`supabase/migrations/`) produce:
+The schema is versioned under `supabase/migrations/`.
 
+```text
+workspaces
+   |
+   +-- users
+   |      |
+   |      +-- invitations
+   |      |
+   |      +-- event_team_members -- events -- photos
+   |                                      |
+   |                                      +-- galleries -- gallery_photos -- photos
 ```
-workspaces ──< users ──< event_team_members >── events ──< photos
-                │                                    │
-                └──< invitations                     └──< galleries ──< gallery_photos >── photos
+
+- `workspaces` is the tenancy boundary.
+- `users` stores the verified Clerk ID, role, email, and workspace.
+- `invitations` stores pending workspace invitations and their status.
+- `events` belongs to one workspace and has a lifecycle status.
+- `event_team_members` is the relationship that grants event access.
+- `photos` stores metadata only: event, uploader, filename, storage ID, MIME
+  type, size, and timestamps.
+- `galleries` stores event-scoped gallery metadata, slug, PIN, and status.
+- `gallery_photos` stores the admin's selected photo set.
+
+PostgreSQL stores metadata only. Image files are stored in Appwrite.
+
+## API overview
+
+All application routes are under `/api/v1`.
+
+| Area             | Routes                                      | Access                                             |
+| ---------------- | ------------------------------------------- | -------------------------------------------------- |
+| Health           | `GET /health`, `GET /api/v1/health`         | Public                                             |
+| Identity         | `GET /api/v1/me`                            | Authenticated                                      |
+| Dashboard        | `GET /api/v1/stats`                         | Authenticated, role-scoped                         |
+| Workspace team   | `/team-members` and related routes          | Admin                                              |
+| Events           | `/events` CRUD                              | Reads authenticated; writes admin                  |
+| Event assignment | `/events/:id/team-members`                  | Admin                                              |
+| Photos           | `/events/:id/photos`, `/photos/:id`         | Assigned member upload/read-own; admin full access |
+| Galleries        | `/events/:id/galleries`, `/galleries/:id/*` | Admin                                              |
+| Public galleries | `/public/galleries/:slug/*`                 | Public, PIN/token protected                        |
+
+Errors use a consistent response shape:
+
+```json
+{ "error": "A safe user-facing message" }
 ```
 
-- **workspaces** — every user belongs to exactly one; the tenancy boundary
-- **users** — `clerk_user_id` UNIQUE is the stable identity key; role enum `ADMIN | TEAM_MEMBER`
-- **invitations** — pending invites, claimed on the invitee's first verified sign-in
-- **events** — workspace-scoped; status `draft | active | completed`
-- **event_team_members** — the assignment relationship; the ONLY way a member gains event access
-- **photos** — metadata only (event, uploader, filename, `storage_file_id` UNIQUE, mime, size); binaries live in Appwrite
-- **galleries** — event-scoped; unique slug, 6-digit PIN, `draft | published`
-- **gallery_photos** — the curation join; every photo in a gallery belongs to the same event (enforced in SQL)
-
-All tables are RLS-enabled with no anon policies — the backend connects with the
-service role and enforces authorization in application code (workspace + role +
-relationship checks on every request).
-
-## API surface
-
-All application endpoints live under `/api/v1`. Errors are always
-`{ "error": "..." }` — internals never leak.
-
-| Area | Endpoints | Access |
-| --- | --- | --- |
-| Health | `GET /health`, `GET /api/v1/health` | public |
-| Identity | `GET /api/v1/me` | authenticated |
-| Dashboard | `GET /api/v1/stats` — counts, 14-day upload series, activity feed | authed (role-scoped) |
-| Team | `GET/POST /api/v1/team-members`, `POST …/invite`, `PATCH …/:id/role`, `DELETE …/:id` | ADMIN |
-| Events | `GET/POST /api/v1/events`, `GET/PATCH/DELETE /api/v1/events/:id` | authed (writes ADMIN) |
-| Event team | `GET/POST/DELETE /api/v1/events/:id/team-members` | read authed, writes ADMIN |
-| Photos | `POST /api/v1/events/:eventId/photos` (multipart), `GET …/photos`, `DELETE /api/v1/photos/:photoId` | members upload to assigned events, delete ADMIN |
-| Galleries | `POST /api/v1/events/:id/galleries`, `GET …/galleries`, `POST /api/v1/galleries/:id/publish`, `PATCH /api/v1/galleries/:id` (set PIN), `POST …/pin/regenerate` | ADMIN |
-| Public | `GET /api/v1/public/galleries/:slug`, `POST …/unlock`, `GET …/photos/:photoId?st=` | public (PIN-gated) |
+Internal error details are logged server-side and are not returned to clients.
 
 ## Security model
 
-- **Identity** only from verified Clerk bearer tokens (`verifyToken`); client-sent
-  user IDs are never trusted — uploader/workspace/author fields are always
-  server-derived (covered by tests that try to spoof them).
-- **Authorization**: roles live in Postgres, re-read per request; team members
-  need an `event_team_members` row per event; every read/write is workspace-scoped.
-- **Uploads**: MIME allowlist (JPEG/PNG/WebP) enforced twice (multer filter + handler),
-  25 MB cap, UUID storage keys — original filenames never touch the filesystem path.
-- **Public gallery**: server-side timing-safe PIN comparison, in-memory rate limit
-  (5 failures / slug+IP / 15 min), unpublished galleries are indistinguishable from
-  missing ones (404 both).
-- **Photo delivery**: customers never receive raw storage URLs. Photos stream
-  through the backend behind an HMAC-signed, slug-bound, 12-hour access token
-  minted at PIN unlock (`gallery-tokens.ts`).
-- **Secrets** stay server-side; env is zod-validated at boot (the server refuses
-  to start misconfigured); error responses are generic, details go to server logs.
+- Clerk is the only identity provider. Supabase Auth and custom JWTs are not
+  used.
+- The backend verifies every authenticated Clerk token.
+- User IDs, uploader IDs, roles, and workspace IDs are never trusted from the
+  browser.
+- Roles are read from PostgreSQL, not from client state.
+- Every workspace query is scoped to the authenticated user's workspace.
+- Team members need an `event_team_members` row to access an event.
+- Team-member photo reads are filtered by the authenticated uploader ID.
+- Uploads accept JPEG, PNG, and WebP files with a 25 MB per-file limit.
+- Gallery PIN attempts are rate-limited per gallery and IP address.
+- Unpublished galleries are not exposed through the public API.
+- Public gallery photos use signed, time-limited backend URLs.
+- Secrets are validated at backend startup and are never committed to Git.
 
-## Local setup
+## Repository structure
 
-Requires [Bun](https://bun.sh) and Node ≥ 24.
+```text
+.
+├── apps/
+│   ├── frontend/              # Next.js application
+│   └── backend/               # Express API and Dockerfile
+├── packages/                  # Shared workspace configuration
+├── supabase/migrations/       # Versioned PostgreSQL migrations
+├── .github/workflows/ci.yml   # GitHub Actions checks
+├── turbo.json
+├── package.json
+└── bun.lock
+```
+
+## Local development
+
+Requirements: Bun 1.x, Node.js 24+, PostgreSQL with the migrations applied, a
+Clerk development instance, and an Appwrite project with a storage bucket.
 
 ```sh
 bun install
-
-cp apps/frontend/.env.example apps/frontend/.env.local   # fill in
-cp apps/backend/.env.example  apps/backend/.env.local    # fill in
-
-bun run dev --filter=frontend   # Next.js on :3000
-bun run dev --filter=backend    # Express on :4000 (tsx watch)
+cp apps/frontend/.env.example apps/frontend/.env.local
+cp apps/backend/.env.example apps/backend/.env.local
 ```
 
-Create the schema either through the Supabase CLI or by applying the files in
-`supabase/migrations/` in filename order against your Postgres.
+Apply the SQL migrations to the development database, then start the apps in
+separate terminals:
+
+```sh
+bun run dev --filter=frontend
+bun run dev --filter=backend
+```
+
+The frontend runs on `http://localhost:3000`; the backend runs on
+`http://localhost:4000`.
+
+Useful commands:
+
+```sh
+bun run lint
+bun run check-types
+bun run build
+bun run test
+```
 
 ## Environment variables
 
-**Frontend** (`apps/frontend/.env.local`): `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`,
-`NEXT_PUBLIC_API_URL`, plus the `NEXT_PUBLIC_CLERK_SIGN_*` route vars emitted by
-`clerk init`.
+### Frontend: `apps/frontend/.env.local`
 
-**Backend** (`apps/backend/.env.local`): `DATABASE_URL`, `DATABASE_SSL_CA`,
-`CLERK_SECRET_KEY`, `APPWRITE_ENDPOINT`, `APPWRITE_PROJECT_ID`,
-`APPWRITE_API_KEY`, `APPWRITE_BUCKET_ID`, and optional
-`GALLERY_TOKEN_SECRET` (dedicated secret for signing gallery access tokens —
-derived from the Clerk key if unset). Names only live in `.env.example`;
-real values are never committed.
-
-## Tests
-
-```sh
-bun run test   # = turbo test → backend vitest
+```dotenv
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
+CLERK_SECRET_KEY=sk_test_...
+NEXT_PUBLIC_API_URL=http://localhost:4000
+NEXT_PUBLIC_CLERK_SIGN_IN_URL=/login
+NEXT_PUBLIC_CLERK_SIGN_UP_URL=/register
+NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL=/dashboard
+NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL=/dashboard
 ```
 
-60 integration tests across six suites (`api`, `authorization`, `photos`,
-`galleries`, `public-gallery`, `stats`). Clerk verification and Appwrite are mocked at
-the boundary; **Postgres is real** — authorization, tenancy, and workflows are
-exercised end-to-end:
+`NEXT_PUBLIC_*` values are exposed to the browser. `CLERK_SECRET_KEY` is
+server-only and is required by the Next.js Clerk proxy configuration.
 
-- authentication (401s), role gates (403s), cross-workspace isolation (404s)
-- invitation → first-login provisioning (member claims pending row, self-signup → ADMIN)
-- upload: assignment enforcement, uploader-spoof rejection, MIME rejection
-- galleries: creation, cross-event photo rejection, publishing, PIN set/regenerate
-- public surface: wrong/right PIN, rate-limit lockout, token-signed photo streaming,
-  token-vs-gallery binding, draft-gallery non-existence
+### Backend: `apps/backend/.env.local`
 
-The DB-backed suites need `TEST_DATABASE_URL` (any empty Postgres with the
-migrations applied); they are skipped when it's absent. CI provisions one
-automatically.
+```dotenv
+DATABASE_URL=postgresql://user:password@host:port/database
+DATABASE_SSL_CA=./prod-ca-2021.crt
+CLERK_SECRET_KEY=sk_test_...
+APPWRITE_ENDPOINT=https://cloud.appwrite.io/v1
+APPWRITE_PROJECT_ID=your-project-id
+APPWRITE_API_KEY=your-server-api-key
+APPWRITE_BUCKET_ID=photos
+GALLERY_TOKEN_SECRET=replace-with-a-long-random-secret
+NODE_ENV=development
+PORT=4000
+```
 
-## Deployment
+`DATABASE_SSL_CA` is required in production for a remote PostgreSQL database.
+`GALLERY_TOKEN_SECRET` should be a separate random secret in production. Real
+values must never be committed.
 
-Not deployed at the time of writing — the intended path:
+## Production deployment
 
-- **Frontend** → Vercel (`NEXT_PUBLIC_*` vars are inlined at build time; set them
-  in the project settings, never at runtime).
-- **Backend** → Railway/Render/Fly (Node 24, `bun run build && node dist/server.js`,
-  health check on `/health`; all env vars from the table above, `NODE_ENV=production`,
-  `DATABASE_SSL_CA` pointing at the bundled Supabase CA cert).
-- **Database** → Supabase (already cloud-hosted; apply migrations, use the
-  transaction-pooler connection string).
-- **Storage** → Appwrite Cloud (already configured).
+### Supabase
 
-Dockerfiles exist for both apps but are currently known-broken (backend ESM/CJS
-mismatch, frontend build-time API URL) — see `AGENTS.md` before relying on them.
+1. Create or select the production project.
+2. Apply every file in `supabase/migrations/` in filename order.
+3. Copy the transaction-pooler connection string into Render's
+   `DATABASE_URL`.
+4. Keep the production Supabase CA certificate at
+   `apps/backend/prod-ca-2021.crt` so the Docker image can verify TLS.
 
-## Demo credentials
+### Appwrite
 
-Provisioned on the live deployment at submission time (self-registering as admin
-is part of the app's design; members join via email invitation):
+Create the production project and image bucket, then create a server API key
+with only the storage permissions required by the backend. Add the endpoint,
+project ID, API key, and bucket ID to Render.
 
-- **Demo Admin** — created via `/register` (self-signups provision as ADMIN)
-- **Demo Team Member** — invited from Team Management; accepts the Clerk email invite
-- **Demo Gallery** — URL + 6-digit PIN published from the demo event
+### Backend on Render
+
+The Render service uses the repository root as the Docker build context:
+
+```text
+Environment: Docker
+Dockerfile path: apps/backend/Dockerfile
+Docker build context: repository root (.)
+Health check path: /health
+Branch: main
+```
+
+Build locally with:
+
+```sh
+docker build -f apps/backend/Dockerfile -t frameflow-backend .
+```
+
+Required Render variables:
+
+```dotenv
+NODE_ENV=production
+CLERK_SECRET_KEY=sk_live_...
+DATABASE_URL=your-production-supabase-connection-string
+DATABASE_SSL_CA=./prod-ca-2021.crt
+APPWRITE_ENDPOINT=https://cloud.appwrite.io/v1
+APPWRITE_PROJECT_ID=your-production-project-id
+APPWRITE_API_KEY=your-production-server-api-key
+APPWRITE_BUCKET_ID=your-production-bucket-id
+GALLERY_TOKEN_SECRET=your-long-random-production-secret
+```
+
+The application binds to `0.0.0.0` and uses Render's `PORT` value. Verify the
+service after deployment:
+
+```sh
+curl https://trizen-ai.onrender.com/health
+curl https://trizen-ai.onrender.com/api/v1/health
+```
+
+### Frontend on Vercel
+
+Connect the repository to Vercel and deploy the `apps/frontend` Next.js app.
+Set these Production variables:
+
+```dotenv
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_live_...
+CLERK_SECRET_KEY=sk_live_...
+NEXT_PUBLIC_API_URL=https://trizen-ai.onrender.com
+NEXT_PUBLIC_CLERK_SIGN_IN_URL=/login
+NEXT_PUBLIC_CLERK_SIGN_UP_URL=/register
+NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL=/dashboard
+NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL=/dashboard
+```
+
+Redeploy after changing any `NEXT_PUBLIC_*` value because those values are
+embedded during the Next.js build.
+
+### Clerk production setup
+
+1. Use the Production Clerk instance for the Vercel deployment.
+2. Add the Vercel URL to Clerk's allowed origins and redirect URLs.
+3. Confirm `/login`, `/register`, `/dashboard`, and the Clerk proxy path in
+   production.
+4. Configure a verified sending domain if production invitation emails are
+   required.
+
+Without a verified email domain, use the pending-member flow and share the
+registration URL manually. Never put `CLERK_SECRET_KEY` in frontend code or a
+`NEXT_PUBLIC_*` variable.
+
+## Testing
+
+Vitest and Supertest cover authentication, role checks, workspace isolation,
+event assignment, assigned-event visibility, upload authorization, uploader
+attribution, file validation, gallery creation, publishing, PIN changes, rate
+limiting, and signed public gallery access.
+
+```sh
+bun run lint
+bun run check-types
+bun run test
+bun run build
+```
+
+The database-backed integration suites require `TEST_DATABASE_URL` with the
+migrations applied. GitHub Actions provisions PostgreSQL, applies migrations,
+and runs the verification pipeline on pushes to `main` and pull requests.
 
 ## Known limitations
 
-- **Deployment pending** — the app is not yet live online (see [Deployment](#deployment)).
-- Dashboard photo thumbnails still use direct Appwrite URLs for signed-in users
-  (same-origin trust, UUID keys); the **public** surface is fully proxied. Bucket
-  permissions are currently open — hardening them end-to-end is planned.
-- PINs are stored in plaintext in Postgres; hashing requires a coordinated
-  migration + deploy.
-- The PIN rate limiter is in-memory (per process) — multi-instance deployments
-  need a shared store.
-- No thumbnails/resizing or pagination yet (photo lists are full-list fetches;
-  fine at demo scale, flagged for scale work).
-- The dashboard's upload chart shows the last 14 days only (no longer-range
-  analytics); events detail, team, galleries and the customer gallery run on
-  the real API.
+- Production Clerk invitation emails require a verified sending domain; the
+  manual pending-member flow is available without one.
+- Gallery PINs are currently stored as plaintext in PostgreSQL.
+- Rate limiting is in-memory and therefore per backend process.
+- Authenticated dashboard previews use Appwrite view URLs; public gallery
+  photos use the signed backend proxy.
+- Photo grids load the complete event set; thumbnails and pagination are not
+  implemented yet.
+- Bulk ZIP downloads, gallery expiry, and gallery unpublish are not included.
 
-## Repository notes
+## License
 
-- `AGENTS.md` — the engineering rulebook (architecture invariants, conventions,
-  security rules). Read before changing anything.
-- `docs/AUDIT-2026-09-10.md` — a full-repository self-audit with findings and fixes.
-- Conventional Commits; small, reviewed changes; CI gates every PR.
+This repository was created as an internship challenge submission.
