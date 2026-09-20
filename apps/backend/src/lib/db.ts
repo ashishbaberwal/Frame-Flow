@@ -270,19 +270,25 @@ export async function insertPhoto(
 }
 
 /** All photos of an event, newest first (scoped by event_id — never global). */
-export async function listEventPhotos(env: Env, eventId: string): Promise<DbPhoto[]> {
+export async function listEventPhotos(
+  env: Env,
+  eventId: string,
+  uploadedBy?: string
+): Promise<DbPhoto[]> {
   // Join the uploader so the UI can attribute each photo. LEFT JOIN keeps the
   // photo visible even if the user row were ever missing. COALESCE falls back
   // to the email because accounts created without a display name have name=''.
+  const uploaderFilter = uploadedBy ? "AND p.uploaded_by = $2" : "";
+  const params = uploadedBy ? [eventId, uploadedBy] : [eventId];
   const result = await getPool(env).query<DbPhoto>(
     `SELECT p.*,
             COALESCE(NULLIF(u.name, ''), u.email) AS uploader_name,
             u.role AS uploader_role
      FROM photos p
      LEFT JOIN users u ON u.id = p.uploaded_by
-     WHERE p.event_id = $1
+     WHERE p.event_id = $1 ${uploaderFilter}
      ORDER BY p.created_at DESC`,
-    [eventId]
+    params
   );
   return result.rows;
 }
@@ -610,9 +616,12 @@ export async function listEventsForUser(env: Env, user: DbUser): Promise<DbEvent
     return listWorkspaceEvents(env, user.workspace_id);
   }
   const result = await getPool(env).query<DbEvent>(
-    `SELECT ${EVENT_COLUMNS} FROM events e
+    `SELECT e.*, COUNT(p.id)::int AS photo_count
+     FROM events e
      JOIN event_team_members etm ON etm.event_id = e.id
+     LEFT JOIN photos p ON p.event_id = e.id AND p.uploaded_by = $1
      WHERE etm.user_id = $1 AND e.workspace_id = $2
+     GROUP BY e.id
      ORDER BY e.created_at DESC`,
     [user.id, user.workspace_id]
   );

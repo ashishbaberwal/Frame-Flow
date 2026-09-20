@@ -315,6 +315,15 @@ describeIf(hasDb)("Phase 2 authorization", () => {
     expect(list.body.events.some((e: { id: string }) => e.id === eventId)).toBe(true);
   });
 
+  it("admin can change an event from draft to active", async () => {
+    const res = await request(app)
+      .patch(`/api/v1/events/${eventId}`)
+      .set(adminAuth)
+      .send({ status: "active" });
+    expect(res.status).toBe(200);
+    expect(res.body.event.status).toBe("active");
+  });
+
   it("member cannot access an unassigned event (403)", async () => {
     const res = await request(app).get(`/api/v1/events/${eventId}`).set(memberAuth);
     expect(res.status).toBe(403);

@@ -9,7 +9,6 @@ import {
   MapPin,
   Images,
   Upload,
-  UserPlus,
   Sparkles,
   ArrowLeft,
   CheckCircle2,
@@ -221,21 +220,22 @@ export default function EventDetailPage() {
             <Upload /> Upload photos
           </Button>
           {isAdmin && (
-            <Button variant="outline" onClick={() => setActiveTab("team")}>
-              <UserPlus /> Assign team
+            <Button variant="outline" onClick={() => setWizardOpen(true)}>
+              <Sparkles /> Create gallery
             </Button>
           )}
-          <Button variant="outline" onClick={() => setWizardOpen(true)}>
-            <Sparkles /> Create gallery
-          </Button>
         </div>
 
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-6">
+        <Tabs
+          value={isAdmin ? activeTab : "photos"}
+          onValueChange={setActiveTab}
+          className="mt-6"
+        >
           <TabsList className="w-full justify-start overflow-x-auto no-scrollbar sm:w-auto">
-            <TabsTrigger value="overview">Overview</TabsTrigger>
+            {isAdmin && <TabsTrigger value="overview">Overview</TabsTrigger>}
             <TabsTrigger value="photos">Photos</TabsTrigger>
-            <TabsTrigger value="team">Team</TabsTrigger>
-            <TabsTrigger value="galleries">Galleries</TabsTrigger>
+            {isAdmin && <TabsTrigger value="team">Team</TabsTrigger>}
+            {isAdmin && <TabsTrigger value="galleries">Galleries</TabsTrigger>}
           </TabsList>
 
           {/* Overview */}
@@ -344,11 +344,13 @@ export default function EventDetailPage() {
                     {formatNumber(photos.length)}{" "}
                     {photos.length === 1 ? "photo" : "photos"} in this event
                   </p>
-                  <Button asChild size="sm" variant="outline">
-                    <Link href={`/dashboard/events/${event.id}/photos`}>
-                      Curate in photo workspace <CheckCircle2 className="size-4" />
-                    </Link>
-                  </Button>
+                  {isAdmin && (
+                    <Button asChild size="sm" variant="outline">
+                      <Link href={`/dashboard/events/${event.id}/photos`}>
+                        Curate in photo workspace <CheckCircle2 className="size-4" />
+                      </Link>
+                    </Button>
+                  )}
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
                   {photos.map((photo) => (
@@ -360,12 +362,14 @@ export default function EventDetailPage() {
           </TabsContent>
 
           {/* Team */}
-          <TabsContent value="team">
-            <EventTeamPanel eventId={event.id} isAdmin={user?.role === "admin"} />
-          </TabsContent>
+          {isAdmin && (
+            <TabsContent value="team">
+              <EventTeamPanel eventId={event.id} isAdmin />
+            </TabsContent>
+          )}
 
           {/* Galleries — every gallery for this event, with its share link and PIN */}
-          <TabsContent value="galleries">
+          {isAdmin && <TabsContent value="galleries">
             {galleries.length === 0 ? (
               // Informational only — "Create gallery" is a button above.
               <EmptyState
@@ -445,7 +449,7 @@ export default function EventDetailPage() {
                 ))}
               </ul>
             )}
-          </TabsContent>
+          </TabsContent>}
         </Tabs>
       </div>
 

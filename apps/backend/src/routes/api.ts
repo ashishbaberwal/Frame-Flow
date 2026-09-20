@@ -77,7 +77,9 @@ const createEventSchema = z.object({
   // changes through PATCH /events/:id, never at creation time.
 });
 
-const updateEventSchema = createEventSchema.partial();
+const updateEventSchema = createEventSchema.partial().extend({
+  status: z.enum(["draft", "active", "completed"]).optional(),
+});
 
 const inviteSchema = z.object({
   name: z.string().min(2).max(120),
@@ -504,7 +506,11 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
   router.get("/events/:eventId/photos", (async (req: Request, res: Response) => {
     const ctx = await authorizeEventAccess(req, res);
     if (!ctx) return;
-    const photos = await listEventPhotos(env, ctx.event.id);
+    const photos = await listEventPhotos(
+      env,
+      ctx.event.id,
+      ctx.user.role === "TEAM_MEMBER" ? ctx.user.id : undefined
+    );
     res.json({ photos: photos.map((p) => serializePhoto(p, env)) });
   }) as unknown as import("express").RequestHandler);
 
@@ -535,7 +541,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
   // Event team membership (workspace-scoped)
   // ------------------------------------------------------------------
 
-  router.get("/events/:id/team-members", (async (req: Request, res: Response) => {
+  router.get("/events/:id/team-members", requireRole(env, "ADMIN"), (async (req: Request, res: Response) => {
     const user = await resolveAppUser(env, req);
     const event = await getWorkspaceEvent(env, String(req.params.id), user.workspace_id);
     if (!event) {
@@ -655,7 +661,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     res.status(201).json({ gallery: serializeGallery(gallery, associated) });
   }) as unknown as import("express").RequestHandler);
 
-  router.get("/events/:id/galleries", (async (req: Request, res: Response) => {
+  router.get("/events/:id/galleries", requireRole(env, "ADMIN"), (async (req: Request, res: Response) => {
     const user = await resolveAppUser(env, req);
     const event = await getWorkspaceEvent(env, String(req.params.id), user.workspace_id);
     if (!event) {
