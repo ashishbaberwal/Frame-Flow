@@ -1,5 +1,9 @@
 # FrameFlow
 
+<p align="center">
+  <img src="docs/frameflow-logo.svg" alt="FrameFlow logo" width="720" />
+</p>
+
 FrameFlow is a photo-sharing platform for photography and event teams. An
 admin creates an event, adds team members, receives their uploads, selects the
 photos for delivery, and publishes a PIN-protected gallery for the customer.
