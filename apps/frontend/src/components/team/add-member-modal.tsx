@@ -74,9 +74,12 @@ export function AddMemberModal({
       // Real invitation: creates the workspace member + Clerk invite. This
       // modal previously wrote to an in-memory mock store, so it reported
       // success while persisting nothing.
-      await api.inviteMember(token, { name: values.name, email: values.email });
-      toast.success("Invitation sent", {
-        description: `${values.name} will join this workspace once they accept.`,
+      const result = await api.inviteMember(token, { name: values.name, email: values.email });
+      toast.success(result.emailSent === false ? "Member added as pending" : "Invitation sent", {
+        description:
+          result.emailSent === false
+            ? `${values.name} must register with this email, then they will join your workspace.`
+            : `${values.name} will join this workspace once they accept.`,
       });
       reset();
       setRole("member");

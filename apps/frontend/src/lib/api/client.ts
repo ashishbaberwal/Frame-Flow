@@ -113,7 +113,7 @@ export const api = {
   inviteMember: (
     token: string | null,
     input: { name: string; email: string }
-  ) => apiFetch<{ member: TeamMemberApi; invited: boolean }>("/team-members/invite", { method: "POST", body: input, token }),
+  ) => apiFetch<{ member: TeamMemberApi; invited: boolean; emailSent?: boolean }>("/team-members/invite", { method: "POST", body: input, token }),
   setMemberRole: (
     token: string | null,
     id: string,

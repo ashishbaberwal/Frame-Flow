@@ -12,6 +12,7 @@ import {
   deleteEvent,
   deletePhoto,
   getDashboardStats,
+  getPool,
   getGalleryById,
   getPendingInvitationByEmail,
   getPhotoById,
@@ -229,6 +230,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     // Send the Clerk invitation. Duplicate invitations (422) are tolerated —
     // the local invitation record below is still ensured.
     let clerkInvitationId: string | undefined;
+    let emailSent = true;
     try {
       const invitation = await getClerkClientForEnv(env).invitations.createInvitation({
         emailAddress: email,
@@ -243,9 +245,15 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     } catch (err) {
       const status = (err as { status?: number }).status;
       if (status !== 422) {
-        console.error("Clerk invitation failed:", (err as Error).message);
-        res.status(502).json({ error: "Failed to send invitation" });
-        return;
+        if (status === 403) {
+          // Keep a local pending invitation. The member will be linked when
+          // they register with this exact email address.
+          emailSent = false;
+        } else {
+          console.error("Clerk invitation failed:", (err as Error).message);
+          res.status(502).json({ error: "Failed to create invitation" });
+          return;
+        }
       }
     }
 
@@ -263,17 +271,16 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       (u) => u.email.toLowerCase() === email.toLowerCase() && u.clerk_user_id.startsWith("pending:")
     );
     if (existingPending) {
-      res.status(200).json({ member: serializeUser(existingPending), invited: true });
+      res.status(200).json({ member: serializeUser(existingPending), invited: true, emailSent });
       return;
     }
-    const { getPool } = await import("../lib/db.js");
     const result = await getPool(env).query<DbUser>(
       `INSERT INTO users (clerk_user_id, name, email, role, workspace_id)
        VALUES ($1, $2, $3, 'TEAM_MEMBER', $4)
        RETURNING *`,
       [`pending:${email.toLowerCase()}`, name, email, actor.workspace_id]
     );
-    res.status(201).json({ member: serializeUser(result.rows[0]!), invited: true });
+    res.status(201).json({ member: serializeUser(result.rows[0]!), invited: true, emailSent });
   }) as unknown as import("express").RequestHandler);
 
   /**

@@ -139,10 +139,10 @@ export async function upsertUserFromClerk(
 
   if (!user) {
     // New identity — decide tenancy path.
-    const invited = clerkUser.invitedRole === "TEAM_MEMBER";
+    const pending = await getPendingInvitationByEmail(env, clerkUser.email);
+    const invited = clerkUser.invitedRole === "TEAM_MEMBER" || Boolean(pending);
     if (invited) {
       // Flow B: attach to the inviter's workspace via the pending invitation.
-      const pending = await getPendingInvitationByEmail(env, clerkUser.email);
       if (pending) {
         const ws = await pool.query<{ id: string }>(
           "SELECT id FROM workspaces WHERE id = $1",

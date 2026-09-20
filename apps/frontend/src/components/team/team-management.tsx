@@ -80,7 +80,11 @@ export function TeamManagement() {
     try {
       const token = await getToken();
       const data = await api.inviteMember(token, { name, email });
-      if (data.invited === false) {
+      if (data.invited && data.emailSent === false) {
+        toast.success("Member added as pending", {
+          description: `${data.member.name} must register with this email, then they will join your workspace.`,
+        });
+      } else if (data.invited === false) {
         toast.info(`${data.member.name} is already on your team.`);
       } else {
         toast.success("Invitation sent", {
@@ -95,7 +99,7 @@ export function TeamManagement() {
       const message =
         err instanceof ApiError
           ? err.status === 502
-            ? "Unable to send invitation. Please check the email address and try again."
+            ? "Unable to create the invitation. Please try again."
             : err.status === 403
               ? "You don't have permission to perform this action."
               : err.message
