@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Image from "next/image";
 import Link from "next/link";
 import {
   ArrowRight,
@@ -144,12 +145,19 @@ export default function LandingPage() {
                   <div
                     key={i}
                     className={cn(
-                      "overflow-hidden rounded-md bg-secondary",
+                      "relative overflow-hidden rounded-md bg-secondary",
                       i === 3 || i === 8 ? "col-span-2 aspect-[2/1.05]" : "aspect-square"
                     )}
                   >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={src} alt="" loading="lazy" className="size-full object-cover" />
+                    <Image
+                      src={src}
+                      alt=""
+                      fill
+                      sizes="(max-width: 640px) 25vw, 160px"
+                      loading={i < 2 ? "eager" : "lazy"}
+                      priority={i === 0}
+                      className="object-cover"
+                    />
                   </div>
                 ))}
               </div>
@@ -230,13 +238,14 @@ export default function LandingPage() {
           <ul className="mt-10 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
             {useCases.map((u) => (
               <li key={u.name} className="group relative overflow-hidden rounded-xl">
-                <div className="aspect-[4/5]">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
+                <div className="relative aspect-[4/5]">
+                  <Image
                     src={u.photo}
                     alt={`${u.name} photography`}
+                    fill
+                    sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 220px"
                     loading="lazy"
-                    className="size-full object-cover transition-transform duration-300 group-hover:scale-105"
+                    className="object-cover transition-transform duration-300 group-hover:scale-105"
                   />
                 </div>
                 <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />

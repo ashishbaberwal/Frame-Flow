@@ -1,7 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Fewer bytes over the wire; no runtime behavior change.
+  poweredByHeader: false,
   images: {
+    formats: ["image/avif", "image/webp"],
+    // Cache optimized images for 30 days at the edge.
+    minimumCacheTTL: 2_592_000,
     remotePatterns: [
       {
         protocol: "https",
@@ -20,6 +25,10 @@ const nextConfig: NextConfig = {
         pathname: "/**",
       },
     ],
+  },
+  experimental: {
+    // Tree-shake large icon/motion/chart packages per import.
+    optimizePackageImports: ["lucide-react", "motion", "recharts"],
   },
 };
 

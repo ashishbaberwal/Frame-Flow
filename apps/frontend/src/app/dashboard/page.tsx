@@ -18,10 +18,16 @@ import { api, ApiError } from "@/lib/api/client";
 import { useAuth } from "@clerk/nextjs";
 import { useCurrentUserState } from "@/lib/api/use-current-user";
 import type { Event } from "@/types";
+import dynamic from "next/dynamic";
 import { AppShell } from "@/components/dashboard/app-shell";
 import { StatCard } from "@/components/dashboard/stat-card";
-import { UploadActivityChart } from "@/components/dashboard/upload-activity-chart";
 import { EventCard } from "@/components/events/event-card";
+// Recharts is heavy (~300KB) and only needed for one card — split it out
+// so the dashboard shell paints before the chart bundle arrives.
+const UploadActivityChart = dynamic(
+  () => import("@/components/dashboard/upload-activity-chart").then((m) => m.UploadActivityChart),
+  { ssr: false, loading: () => <Skeleton className="mt-4 h-56 w-full" /> }
+);
 import { EmptyState } from "@/components/dashboard/empty-state";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";

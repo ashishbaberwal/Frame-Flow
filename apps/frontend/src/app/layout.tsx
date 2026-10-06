@@ -9,11 +9,13 @@ import "./globals.css";
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],
+  display: "swap",
 });
 
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
+  display: "swap",
 });
 
 /** Editorial display serif — the studio's typographic voice. */
@@ -21,6 +23,7 @@ const fraunces = Fraunces({
   style: ["normal", "italic"],
   variable: "--font-fraunces",
   subsets: ["latin"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -44,6 +47,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       suppressHydrationWarning
     >
       <body className="min-h-full flex flex-col">
+        {/* Early DNS/TLS for remote images — no visual change. */}
+        <link rel="preconnect" href="https://images.unsplash.com" crossOrigin="anonymous" />
+        <link rel="dns-prefetch" href="https://images.unsplash.com" />
         <ClerkProvider proxyUrl="/__clerk">
           <MotionProvider>
             <ThemeProvider>{children}</ThemeProvider>
