@@ -19,17 +19,18 @@ import {
   getPublishedGalleryBySlug,
   getRecentActivity,
   getUploadsPerDay,
+  countGalleryPhotos,
   getUserByClerkId,
   getUserById,
   getWorkspaceEvent,
   insertGallery,
   insertPhoto,
   isEventMember,
-  listEventGalleries,
+  isPhotoInGallery,
+  listEventGalleriesWithCounts,
   listEventMembers,
   listEventPhotos,
   listEventsForUser,
-  listGalleryPhotoIds,
   listGalleryPhotos,
   listPendingInvitationsForWorkspace,
   listWorkspaceUsers,
@@ -672,13 +673,11 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       res.status(403).json({ error: "Forbidden" });
       return;
     }
-    const galleries = await listEventGalleries(env, event.id);
-    const withCounts = await Promise.all(
-      galleries.map(async (g) =>
-        serializeGallery(g, (await listGalleryPhotoIds(env, g.id)).length)
-      )
-    );
-    res.json({ galleries: withCounts });
+    // Single query with counts — no per-gallery round trip.
+    const galleries = await listEventGalleriesWithCounts(env, event.id);
+    res.json({
+      galleries: galleries.map((g) => serializeGallery(g, Number(g.photo_count))),
+    });
   }) as unknown as import("express").RequestHandler);
 
   /**
@@ -705,7 +704,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       res.status(404).json({ error: "Gallery not found" });
       return;
     }
-    const photoCount = (await listGalleryPhotoIds(env, gallery.id)).length;
+    const photoCount = await countGalleryPhotos(env, gallery.id);
     res.json({ gallery: serializeGallery(published, photoCount) });
   }) as unknown as import("express").RequestHandler);
 
@@ -738,7 +737,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     const ctx = await authorizeGalleryAccess(req, res);
     if (!ctx) return;
     const updated = await updateGalleryPin(env, ctx.gallery.id, parsed.data.pin);
-    const photoCount = (await listGalleryPhotoIds(env, ctx.gallery.id)).length;
+    const photoCount = await countGalleryPhotos(env, ctx.gallery.id);
     res.json({ gallery: serializeGallery(updated!, photoCount) });
   }) as unknown as import("express").RequestHandler);
 
@@ -751,7 +750,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     if (!ctx) return;
     const pin = String(randomInt(0, 1_000_000)).padStart(6, "0");
     const updated = await updateGalleryPin(env, ctx.gallery.id, pin);
-    const photoCount = (await listGalleryPhotoIds(env, ctx.gallery.id)).length;
+    const photoCount = await countGalleryPhotos(env, ctx.gallery.id);
     res.json({ gallery: serializeGallery(updated!, photoCount) });
   }) as unknown as import("express").RequestHandler);
 
@@ -769,7 +768,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       res.status(404).json({ error: "Gallery not found" });
       return;
     }
-    const photoCount = (await listGalleryPhotoIds(env, gallery.id)).length;
+    const photoCount = await countGalleryPhotos(env, gallery.id);
     res.json({ gallery: serializePublicGallery(gallery, photoCount) });
   }) as unknown as import("express").RequestHandler);
 
@@ -840,9 +839,8 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       res.status(404).json({ error: "Photo not found" });
       return;
     }
-    // The photo must actually be part of THIS gallery.
-    const photoIds = await listGalleryPhotoIds(env, gallery.id);
-    if (!photoIds.includes(photo.id)) {
+    // The photo must actually be part of THIS gallery — single EXISTS query.
+    if (!(await isPhotoInGallery(env, gallery.id, photo.id))) {
       res.status(404).json({ error: "Photo not found" });
       return;
     }

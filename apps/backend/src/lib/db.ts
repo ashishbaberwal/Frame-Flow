@@ -409,6 +409,53 @@ export async function listEventGalleries(env: Env, eventId: string): Promise<DbG
   return result.rows;
 }
 
+/**
+ * Galleries of an event with photo counts in ONE query.
+ * Replaces the N+1 pattern (one listGalleryPhotoIds per gallery).
+ * Same order and rows as listEventGalleries — only adds photo_count.
+ */
+export async function listEventGalleriesWithCounts(
+  env: Env,
+  eventId: string
+): Promise<Array<DbGallery & { photo_count: number }>> {
+  const result = await getPool(env).query<DbGallery & { photo_count: number }>(
+    `SELECT g.*, COUNT(gp.photo_id)::int AS photo_count
+     FROM galleries g
+     LEFT JOIN gallery_photos gp ON gp.gallery_id = g.id
+     WHERE g.event_id = $1
+     GROUP BY g.id
+     ORDER BY g.created_at DESC`,
+    [eventId]
+  );
+  return result.rows;
+}
+
+/** Photo count for a single gallery — avoids loading all IDs to count them. */
+export async function countGalleryPhotos(env: Env, galleryId: string): Promise<number> {
+  const result = await getPool(env).query<{ count: number }>(
+    "SELECT COUNT(*)::int AS count FROM gallery_photos WHERE gallery_id = $1",
+    [galleryId]
+  );
+  return result.rows[0]?.count ?? 0;
+}
+
+/**
+ * Membership check for the photo-proxy route: does this photo belong to
+ * this gallery? Single EXISTS-style query instead of loading every photo
+ * ID in the gallery on each image request.
+ */
+export async function isPhotoInGallery(
+  env: Env,
+  galleryId: string,
+  photoId: string
+): Promise<boolean> {
+  const result = await getPool(env).query(
+    "SELECT 1 FROM gallery_photos WHERE gallery_id = $1 AND photo_id = $2",
+    [galleryId, photoId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 export async function publishGallery(env: Env, id: string): Promise<DbGallery | null> {
   const result = await getPool(env).query<DbGallery>(
     `UPDATE galleries
