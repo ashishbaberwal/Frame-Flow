@@ -33,6 +33,8 @@ interface RequestOptions {
   body?: unknown;
   /** Clerk token from useAuth().getToken() — optional for public endpoints. */
   token?: string | null;
+  /** Extra headers (e.g. the pseudonymous visitor id on public routes). */
+  headers?: Record<string, string>;
 }
 
 function buildUrl(path: string): string {
@@ -78,18 +80,19 @@ export async function getSessionToken(
 }
 
 export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = "GET", body, token } = options;
+  const { method = "GET", body, token, headers } = options;
 
-  const headers: Record<string, string> = {
+  const fetchHeaders: Record<string, string> = {
     "Content-Type": "application/json",
+    ...headers,
   };
   if (token) {
-    headers.Authorization = `Bearer ${token}`;
+    fetchHeaders.Authorization = `Bearer ${token}`;
   }
 
   const res = await fetch(buildUrl(path), {
     method,
-    headers,
+    headers: fetchHeaders,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 
@@ -224,36 +227,84 @@ export const api = {
   unlockGallery: (
     slug: string,
     pin: string,
-    params?: { limit?: number; cursor?: string }
+    params?: { limit?: number; cursor?: string; visitorId?: string | null }
   ) => {
     const search = new URLSearchParams();
     if (params?.limit !== undefined) search.set("limit", String(params.limit));
     if (params?.cursor) search.set("cursor", params.cursor);
     const qs = search.toString();
+    const headers: Record<string, string> = {};
+    if (params?.visitorId) headers["x-visitor-id"] = params.visitorId;
     return apiFetch<{
       gallery: PublicGalleryApi;
       photos: PublicPhotoApi[];
       access_token: string;
       expires_at: string;
+      visitor_id: string;
+      correlation_id: string;
       pagination: PaginationApi;
     }>(`/public/galleries/${encodeURIComponent(slug)}/unlock${qs ? `?${qs}` : ""}`, {
       method: "POST",
       body: { pin },
+      headers,
     });
   },
   listPublicPhotos: (
     slug: string,
     accessToken: string,
-    params?: { limit?: number; cursor?: string }
+    params?: { limit?: number; cursor?: string; visitorId?: string | null; correlationId?: string }
   ) => {
     const search = new URLSearchParams({ st: accessToken });
     if (params?.limit !== undefined) search.set("limit", String(params.limit));
     if (params?.cursor) search.set("cursor", params.cursor);
+    if (params?.correlationId) search.set("c", params.correlationId);
+    const headers: Record<string, string> = {};
+    if (params?.visitorId) headers["x-visitor-id"] = params.visitorId;
     return apiFetch<{ photos: PublicPhotoApi[]; pagination: PaginationApi }>(
-      `/public/galleries/${encodeURIComponent(slug)}/photos?${search.toString()}`
+      `/public/galleries/${encodeURIComponent(slug)}/photos?${search.toString()}`,
+      { headers }
     );
   },
 };
+
+/**
+ * Pseudonymous first-party visitor id for analytics (unique-visitor
+ * estimates, never identity). Client-minted UUID in localStorage —
+ * clearing site data resets it. Null on the server or when storage is
+ * unavailable; the backend mints a one-off id in that case.
+ */
+const VISITOR_STORAGE_KEY = "ff_visitor_id";
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function getOrCreateVisitorId(): string | null {
+  if (typeof window === "undefined" || !window.localStorage) return null;
+  try {
+    const existing = window.localStorage.getItem(VISITOR_STORAGE_KEY);
+    if (existing && UUID_RE.test(existing)) return existing.toLowerCase();
+    const fresh =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+            const r = (Math.random() * 16) | 0;
+            return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+          });
+    window.localStorage.setItem(VISITOR_STORAGE_KEY, fresh);
+    return fresh;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist a backend-minted visitor id when the client had none. */
+export function rememberVisitorId(id: string | null | undefined): void {
+  if (!id || typeof window === "undefined" || !window.localStorage) return;
+  try {
+    if (UUID_RE.test(id)) window.localStorage.setItem(VISITOR_STORAGE_KEY, id.toLowerCase());
+  } catch {
+    // Storage unavailable — analytics simply runs without a stable id.
+  }
+}
 
 /** Cursor-pagination metadata returned alongside every photo list. */
 export interface PaginationApi {
@@ -289,12 +340,18 @@ export async function listAllPhotos(
  */
 export async function listAllPublicPhotos(
   slug: string,
-  accessToken: string
+  accessToken: string,
+  session?: { visitorId?: string | null; correlationId?: string }
 ): Promise<{ photos: PublicPhotoApi[] }> {
   const photos: PublicPhotoApi[] = [];
   let cursor: string | undefined;
   for (;;) {
-    const page = await api.listPublicPhotos(slug, accessToken, { limit: 100, cursor });
+    const page = await api.listPublicPhotos(slug, accessToken, {
+      limit: 100,
+      cursor,
+      visitorId: session?.visitorId,
+      correlationId: session?.correlationId,
+    });
     photos.push(...page.photos);
     if (!page.pagination.has_more || !page.pagination.next_cursor) break;
     cursor = page.pagination.next_cursor;

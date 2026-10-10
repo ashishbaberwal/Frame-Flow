@@ -239,7 +239,9 @@ describeIf(hasDb)("Public gallery surface", () => {
     );
     expect(noToken.status).toBe(403);
 
-    const tampered = await request(app).get(`${photoUrl}x`);
+    const tampered = await request(app).get(
+      photoUrl.replace(/([?&])st=[^&]*/, "$1st=tampered")
+    );
     expect(tampered.status).toBe(403);
   });
 

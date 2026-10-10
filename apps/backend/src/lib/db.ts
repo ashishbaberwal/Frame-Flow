@@ -521,9 +521,12 @@ export async function getGalleryById(env: Env, id: string): Promise<DbGallery | 
 export async function getPublishedGalleryBySlug(
   env: Env,
   slug: string
-): Promise<(DbGallery & { event_name: string; event_date: string }) | null> {
-  const result = await getPool(env).query<DbGallery & { event_name: string; event_date: string }>(
-    `SELECT g.*, e.name AS event_name, e.event_date::text AS event_date
+): Promise<(DbGallery & { event_name: string; event_date: string; workspace_id: string }) | null> {
+  const result = await getPool(env).query<
+    DbGallery & { event_name: string; event_date: string; workspace_id: string }
+  >(
+    `SELECT g.*, e.name AS event_name, e.event_date::text AS event_date,
+            e.workspace_id AS workspace_id
      FROM galleries g
      JOIN events e ON e.id = g.event_id
      WHERE g.slug = $1 AND g.status = 'published'`,

@@ -257,6 +257,49 @@ the in-process sweep.
   Worker logs are single-line JSON with no secrets; `SIGTERM`/`SIGINT`
   drain active jobs before exit.
 
+### Analytics events (Kafka)
+
+Customer interactions emit versioned events (`GalleryViewed`,
+`PhotoViewed`, `PhotoDownloaded`, `GalleryDownloaded`, `GalleryShared`;
+contract v1 in `apps/backend/src/lib/analytics-events.ts`):
+
+```sh
+docker compose up kafka -d            # local Kafka on :9092
+# apps/backend/.env.local:  KAFKA_BROKERS=localhost:9092
+
+cd apps/backend && bun run worker:analytics:watch   # consumer (separate terminal)
+```
+
+- Emission points today: successful gallery unlock (`GalleryViewed`) and
+  proxied photo serving (`PhotoViewed` inline, `PhotoDownloaded` for
+  `dl=1`). Dashboard downloads use direct Appwrite URLs and are not
+  observable server-side — `PhotoDownloaded` currently covers customer
+  proxied downloads only.
+- Events carry ids, timestamps, a pseudonymous `visitorId`, a per-unlock
+  `correlationId`, and a normalized traffic source — never PINs, tokens,
+  credentials, emails, IPs, or full URLs. The unlock response echoes
+  `visitor_id`/`correlation_id`; photo URLs carry `v=`/`c=` (img tags
+  cannot set headers). The frontend mints the visitor id into
+  `localStorage` (`x-visitor-id` header); clearing site data resets it.
+  Unique-visitor counts are therefore estimates, not identities.
+- Delivery honesty: producers fire-and-forget *after* the response with a
+  3s timeout — Kafka outages only log, galleries keep serving, and a crash
+  between serving and emitting loses that event (accepted: aggregates are
+  estimates). Consumers are at-least-once: one topic
+  (`frameflow.analytics.v1`), partitioned with gallery-id keys, consumer
+  group `frameflow-analytics-v1`; offsets commit only after the validated
+  event is stored, and redelivery dedupes on the `event_id` primary key.
+  No transactional outbox: the loss window is small and loss-tolerant, so
+  the extra relay was deferred (same reasoning as the thumbnail
+  reconciler).
+- Raw events land in `analytics_event_log` (no FK to galleries — analytics
+  outlive deletions, workspace-scoped by a denormalized column). Phase 5
+  aggregates read from this table.
+- Production: hosted Kafka with an explicitly created topic (gallery-keyed
+  partitions, 7-day retention to match local compose) plus a separate
+  worker service. Vercel/Render provide no Kafka — this is external
+  infrastructure with its own cost.
+
 ## Security model
 
 - Clerk is the only identity provider. Supabase Auth and custom JWTs are not

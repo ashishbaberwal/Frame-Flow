@@ -18,6 +18,8 @@ import { toast } from "sonner";
 import {
   api,
   ApiError,
+  getOrCreateVisitorId,
+  rememberVisitorId,
   resolveAssetUrl,
   type PublicGalleryApi,
   type PublicPhotoApi,
@@ -128,7 +130,15 @@ export default function CustomerGalleryPage() {
     setVerifying(true);
     setPinMessage(null);
     try {
-      const res = await api.unlockGallery(slug, code);
+      const visitorId = getOrCreateVisitorId();
+      const res = await api.unlockGallery(slug, code, { visitorId });
+      // Persist the backend-minted id when the client had none, and carry
+      // the session's correlation id through follow-up pages for stitching.
+      rememberVisitorId(res.visitor_id);
+      const session = {
+        visitorId: res.visitor_id ?? visitorId,
+        correlationId: res.correlation_id,
+      };
       // Unlock returns the first page; large galleries page behind the
       // signed session token with no re-PIN. UI behavior is unchanged —
       // pages are appended before the first render of the grid.
@@ -136,7 +146,11 @@ export default function CustomerGalleryPage() {
       let cursor = res.pagination?.next_cursor ?? null;
       let hasMore = res.pagination?.has_more ?? false;
       while (hasMore && cursor) {
-        const next = await api.listPublicPhotos(slug, res.access_token, { cursor });
+        const next = await api.listPublicPhotos(slug, res.access_token, {
+          cursor,
+          visitorId: session.visitorId,
+          correlationId: session.correlationId,
+        });
         all.push(...next.photos);
         hasMore = next.pagination.has_more;
         cursor = next.pagination.next_cursor;
