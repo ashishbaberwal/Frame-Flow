@@ -202,6 +202,26 @@ GET /api/v1/public/galleries/:slug/photos?st=<token>&limit=50&cursor=<opaque>
 - The unlock response keeps its shape (`gallery`, `access_token`,
   `expires_at`) and adds `pagination`; `gallery.photo_count` is the total.
 
+### Image derivatives
+
+Uploads enqueue two thumbnail variants per photo (`thumb_small` 320w,
+`thumb_large` 960w, WebP) and return `201` without waiting — a background
+sweep processes them through `QUEUED → PROCESSING → READY` (`FAILED` after
+3 attempts, with `last_error` kept on the row). Photo responses carry
+`processing_status` plus per-variant `status`/`url` (URL only when READY);
+grids render thumbnails with the original as fallback. The customer proxy
+serves `.../photos/:photoId?st=<token>&variant=thumb_small` (`409` while
+not ready, `400` for unknown variants). Failures are retried explicitly:
+
+```text
+POST /api/v1/photos/:photoId/derivatives/retry   (admin, workspace-scoped)
+```
+
+Stuck `PROCESSING` rows (crashed worker) are re-queued automatically.
+Originals are never modified; deleting a photo or event also removes its
+derivative binaries (best-effort, like originals). Legacy photos uploaded
+before this feature read as `QUEUED` until the retry endpoint enqueues them.
+
 ## Security model
 
 - Clerk is the only identity provider. Supabase Auth and custom JWTs are not
@@ -415,8 +435,8 @@ and runs the verification pipeline on pushes to `main` and pull requests.
 - Rate limiting is in-memory and therefore per backend process.
 - Authenticated dashboard previews use Appwrite view URLs; public gallery
   photos use the signed backend proxy.
-- Photo grids page through cursor-paginated APIs; thumbnails are not
-  implemented yet.
+- Photo grids page through cursor-paginated APIs and prefer thumbnail
+  URLs with full-size fallback.
 - Bulk ZIP downloads, gallery expiry, and gallery unpublish are not included.
 
 ## License

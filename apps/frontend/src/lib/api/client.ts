@@ -394,6 +394,10 @@ export interface PhotoApi {
   url: string;
   /** Appwrite attachment endpoint — browsers download instead of navigating. */
   download_url: string;
+  /** Derivative pipeline rollup: QUEUED | PROCESSING | READY | FAILED. */
+  processing_status: "QUEUED" | "PROCESSING" | "READY" | "FAILED";
+  /** Per-variant state; url is set only for READY variants. */
+  derivatives: { variant: string; status: string; url: string | null }[];
   created_at: string;
 }
 
@@ -405,10 +409,18 @@ export interface PhotoApi {
  * regardless of who uploaded it. Keep this the only place that translates.
  */
 export function toPhoto(p: PhotoApi): Photo {
+  // Grids render the large thumbnail once it is READY (small as a second
+  // choice); the full original stays one click away via fullUrl/downloadUrl.
+  // Missing/processing derivatives fall back to the original URL — the grid
+  // never breaks on pipeline state.
+  const thumb =
+    p.derivatives?.find((d) => d.variant === "thumb_large" && d.url)?.url ??
+    p.derivatives?.find((d) => d.variant === "thumb_small" && d.url)?.url ??
+    null;
   return {
     id: p.id,
     eventId: p.event_id,
-    url: p.url,
+    url: thumb ?? p.url,
     fullUrl: p.url,
     downloadUrl: p.download_url,
     filename: p.filename,
@@ -522,5 +534,7 @@ export interface PublicPhotoApi {
   filename: string;
   url: string;
   download_url: string;
+  /** Signed proxy thumbnail URLs; null until that variant is READY. */
+  thumbnails: { thumb_small: string | null; thumb_large: string | null };
   created_at: string;
 }
