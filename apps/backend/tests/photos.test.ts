@@ -35,6 +35,14 @@ let uploadCounter = 0;
 const appwriteFiles = new Map<string, number>();
 vi.mock("../src/lib/storage.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/storage.js")>();
+  // Hermetic derivative sweeps: uploads kick the background worker, which
+  // reads originals — serve a tiny valid PNG so no test hits the network.
+  const { default: sharp } = await import("sharp");
+  const tinyPng = await sharp({
+    create: { width: 16, height: 16, channels: 3, background: { r: 1, g: 2, b: 3 } },
+  })
+    .png()
+    .toBuffer();
   return {
     ...actual,
     uploadPhoto: vi.fn(async (_env: unknown, buffer: Buffer, _mime: string, _name: string) => {
@@ -47,6 +55,7 @@ vi.mock("../src/lib/storage.js", async (importOriginal) => {
       appwriteFiles.delete(storageFileId);
     }),
     checkBucket: vi.fn(async () => true),
+    readPhotoBytes: vi.fn(async () => tinyPng),
   };
 });
 

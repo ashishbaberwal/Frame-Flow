@@ -16,6 +16,20 @@ import { getPool } from "./db.js";
 export const DERIVATIVE_JOB_NAME = "derivative";
 export const RECONCILE_JOB_NAME = "reconcile";
 
+/**
+ * A dead Redis must never hang an upload: ioredis queues commands while
+ * (re)connecting, so publishes race a timeout and fall back on expiry.
+ */
+export const PUBLISH_TIMEOUT_MS = 5_000;
+
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("Queue publish timed out")), ms);
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
 /** Stable identity: one job slot per (photo, variant), forever. */
 export function derivativeJobId(photoId: string, variant: string): string {
   return `dv:${photoId}:${variant}`;
@@ -36,14 +50,17 @@ export async function publishDerivativeJobs(
 ): Promise<PublishResult> {
   const queue = getDerivativeQueue(env);
   if (!queue) return { published: false, reason: "queue-unconfigured" };
-  await Promise.all(
-    variants.map((variant) =>
-      queue.add(
-        DERIVATIVE_JOB_NAME,
-        { photoId, variant },
-        { jobId: derivativeJobId(photoId, variant) }
+  await withTimeout(
+    Promise.all(
+      variants.map((variant) =>
+        queue.add(
+          DERIVATIVE_JOB_NAME,
+          { photoId, variant },
+          { jobId: derivativeJobId(photoId, variant) }
+        )
       )
-    )
+    ),
+    PUBLISH_TIMEOUT_MS
   );
   return { published: true };
 }
@@ -69,14 +86,17 @@ export async function reconcileDerivativeJobs(env: Env): Promise<ReconcileResult
      LIMIT $2`,
     [MAX_DERIVATIVE_ATTEMPTS, 100]
   );
-  await Promise.all(
-    pending.rows.map((r) =>
-      queue.add(
-        DERIVATIVE_JOB_NAME,
-        { photoId: r.photo_id, variant: r.variant },
-        { jobId: derivativeJobId(r.photo_id, r.variant) }
+  await withTimeout(
+    Promise.all(
+      pending.rows.map((r) =>
+        queue.add(
+          DERIVATIVE_JOB_NAME,
+          { photoId: r.photo_id, variant: r.variant },
+          { jobId: derivativeJobId(r.photo_id, r.variant) }
+        )
       )
-    )
+    ),
+    PUBLISH_TIMEOUT_MS
   );
   return { recovered, published: pending.rows.length };
 }
