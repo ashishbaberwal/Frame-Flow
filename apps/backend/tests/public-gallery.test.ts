@@ -133,6 +133,12 @@ describeIf(hasDb)("Public gallery surface", () => {
     await pool.query("DELETE FROM galleries WHERE event_id IN (SELECT id FROM events WHERE name LIKE 'Public Gal Ev %')");
     await pool.query("DELETE FROM photos WHERE event_id IN (SELECT id FROM events WHERE name LIKE 'Public Gal Ev %')");
     await pool.query("DELETE FROM events WHERE name LIKE 'Public Gal Ev %'");
+    // Clerk IDs are shared with other suites — remove attributed photos before
+    // the users delete (photos.uploaded_by is NO ACTION).
+    await pool.query(
+      `DELETE FROM photos WHERE uploaded_by IN
+       (SELECT id FROM users WHERE clerk_user_id IN ('clerk_admin_1','clerk_member_1','clerk_admin_2'))`
+    );
     await pool.query(
       `DELETE FROM invitations WHERE invited_by IN (SELECT id FROM users WHERE clerk_user_id LIKE 'clerk_%')`
     );

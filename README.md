@@ -222,6 +222,41 @@ Originals are never modified; deleting a photo or event also removes its
 derivative binaries (best-effort, like originals). Legacy photos uploaded
 before this feature read as `QUEUED` until the retry endpoint enqueues them.
 
+### Background jobs (Redis + BullMQ)
+
+Thumbnail work runs in a separate worker process when Redis is configured:
+
+```sh
+docker compose up redis -d          # local Redis on :6379
+# apps/backend/.env.local:  REDIS_URL=redis://localhost:6379
+
+bun run dev --filter=backend        # API (:4000)
+cd apps/backend && bun run worker:thumbnails:watch   # worker (separate terminal)
+```
+
+Production runs the compiled worker as its own service
+(`node dist/workers/thumbnails.js`) with `REDIS_URL` pointing at managed
+Redis. Without `REDIS_URL`, everything still works: the API falls back to
+the in-process sweep.
+
+- Uploads publish one job per variant (`dv:<photoId>:<variant>`) with
+  3 attempts, exponential backoff (5s base), a 120s processor timeout, and
+  bounded worker concurrency (2). Replies never wait for jobs.
+- PostgreSQL stays authoritative: jobs that find a `READY` row or lose the
+  `PG` claim race are skips, so redelivery never duplicates derivatives.
+- Recovery without an outbox (deliberate): a repeatable reconciler job
+  (every 60s) re-queues crashed rows and republishes anything still
+  `QUEUED`/`FAILED`-with-budget — including photos created while Redis was
+  down. A transactional outbox would narrow the already-small loss window
+  (enqueue-then-publish crash) at the cost of a relay poller and new tables;
+  the reconciler bounds that window to ~60s with visible `QUEUED` rows, so
+  the outbox was deferred. Publish failures also trigger the in-process
+  sweep immediately, and the admin retry endpoint always works.
+- `GET /api/v1/queues/derivatives` (admin) reports BullMQ counts
+  (`configured: false` without Redis, `503` when Redis is unreachable).
+  Worker logs are single-line JSON with no secrets; `SIGTERM`/`SIGINT`
+  drain active jobs before exit.
+
 ## Security model
 
 - Clerk is the only identity provider. Supabase Auth and custom JWTs are not

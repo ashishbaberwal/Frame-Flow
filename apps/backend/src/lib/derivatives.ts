@@ -372,9 +372,9 @@ export function kickDerivativeWorker(env: Env): void {
 }
 
 /**
- * Explicit admin recovery: ensure rows exist, reset FAILED rows to QUEUED
- * with a fresh attempt budget, and trigger a sweep. READY rows are kept —
- * never reprocessed.
+ * Explicit admin recovery: ensure rows exist and reset FAILED rows to QUEUED
+ * with a fresh attempt budget. READY rows are kept — never reprocessed. The
+ * caller dispatches the work (publish-first, sweep fallback).
  */
 export async function requeuePhotoDerivatives(
   env: Env,
@@ -387,6 +387,5 @@ export async function requeuePhotoDerivatives(
      WHERE photo_id = $1 AND status = 'FAILED'`,
     [photoId]
   );
-  kickDerivativeWorker(env);
   return getPhotoDerivatives(env, photoId);
 }

@@ -67,6 +67,7 @@ import {
   type DbDerivative,
 } from "../lib/derivatives.js";
 import { getDerivativeQueue } from "../lib/queue.js";
+import { publishDerivativeJobs } from "../lib/derivative-jobs.js";
 import type { AuthedRequest } from "../middleware/auth.js";
 import { requireRole } from "../middleware/auth.js";
 import { HttpError } from "../middleware/error.js";
@@ -154,6 +155,22 @@ function serializePhotoPage(page: { nextCursor: string | null; hasMore: boolean 
 }
 
 /**
+ * Hand thumbnail work to the background without ever blocking the response.
+ * With Redis: publish to BullMQ (the worker processes + reconciles). Without
+ * it — or when publishing fails/times out — the in-process sweep runs
+ * instead. Either way the photo's rows stay QUEUED and recoverable.
+ */
+async function dispatchDerivativeWork(env: Env, photoId: string): Promise<void> {
+  try {
+    const result = await publishDerivativeJobs(env, photoId);
+    if (!result.published) kickDerivativeWorker(env);
+  } catch (err) {
+    console.error("Derivative publish failed:", (err as Error).message);
+    kickDerivativeWorker(env);
+  }
+}
+
+/**
  * Resolve the Postgres row for the verified Clerk identity on the request.
  * Identity comes from requireAuth (verified Clerk token) — never the client.
  */
@@ -226,7 +243,12 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       return;
     }
     try {
-      const counts = await queue.getJobCounts();
+      const counts = await Promise.race([
+        queue.getJobCounts(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("queue timeout")), 3_000)
+        ),
+      ]);
       res.json({ configured: true, counts });
     } catch {
       res.status(503).json({ error: "Queue unavailable" });
@@ -568,17 +590,17 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
               mime_type: file.mimetype,
               file_size: file.size,
             });
-            // 3. Derivative rows → Postgres (idempotent), then trigger the
-            //    background sweep WITHOUT waiting — the 201 must not block on
-            //    sharp/Appwrite. A failed enqueue only logs: the photo reads
-            //    as QUEUED and the retry endpoint recovers it.
+            // 3. Derivative rows → Postgres (idempotent), then hand to the
+            //    background WITHOUT waiting — the 201 must not block on
+            //    sharp/Appwrite/Redis. A failed enqueue only logs: the photo
+            //    reads as QUEUED and the retry endpoint recovers it.
             let derivatives: DbDerivative[] = [];
             try {
               derivatives = await enqueuePhotoDerivatives(env, photo.id);
             } catch (enqueueErr) {
               console.error("Derivative enqueue failed:", (enqueueErr as Error).message);
             }
-            kickDerivativeWorker(env);
+            void dispatchDerivativeWork(env, photo.id);
             uploaded.push(serializePhoto(photo, env, derivatives));
           } catch (metaErr) {
             await deletePhotoQuietly(env, stored.storageFileId);
@@ -680,6 +702,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       return;
     }
     const derivatives = await requeuePhotoDerivatives(env, photo.id);
+    void dispatchDerivativeWork(env, photo.id);
     res.json({
       photo_id: photo.id,
       processing_status: summarizeProcessingStatus(derivatives),
