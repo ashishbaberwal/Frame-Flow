@@ -56,6 +56,16 @@ import {
 } from "../lib/db.js";
 import { getClerkClientForEnv } from "../lib/clerk.js";
 import { GALLERY_TOKEN_TTL_MS, signGalleryAccessToken, verifyGalleryAccessToken } from "../lib/gallery-tokens.js";
+import {
+  enqueuePhotoDerivatives,
+  getDerivativesForPhotos,
+  getPhotoDerivative,
+  isDerivativeVariant,
+  kickDerivativeWorker,
+  requeuePhotoDerivatives,
+  summarizeProcessingStatus,
+  type DbDerivative,
+} from "../lib/derivatives.js";
 import type { AuthedRequest } from "../middleware/auth.js";
 import { requireRole } from "../middleware/auth.js";
 import { HttpError } from "../middleware/error.js";
@@ -458,12 +468,21 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       return;
     }
     // Collect the storage keys first — deleting the event row cascades the
-    // photo metadata away, and there would be nothing left to look up.
+    // photo metadata (and derivative rows) away, and there would be nothing
+    // left to look up.
     const photos = await listEventPhotos(env, event.id);
+    const derivativeMap = await getDerivativesForPhotos(
+      env,
+      photos.map((p) => p.id)
+    );
     await deleteEvent(env, event.id);
-    // Best-effort binary cleanup in Appwrite; a leftover object is preferable
-    // to failing a delete whose metadata is already gone.
-    await Promise.all(photos.map((p) => deletePhotoQuietly(env, p.storage_file_id)));
+    // Best-effort binary cleanup in Appwrite (originals AND derivatives); a
+    // leftover object is preferable to failing a delete whose metadata is
+    // already gone.
+    await Promise.all([
+      ...photos.map((p) => deletePhotoQuietly(env, p.storage_file_id)),
+      ...[...derivativeMap.values()].flat().map((d) => deletePhotoQuietly(env, d.storage_file_id)),
+    ]);
     res.status(204).send();
   }) as unknown as import("express").RequestHandler);
 
@@ -526,7 +545,18 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
               mime_type: file.mimetype,
               file_size: file.size,
             });
-            uploaded.push(serializePhoto(photo, env));
+            // 3. Derivative rows → Postgres (idempotent), then trigger the
+            //    background sweep WITHOUT waiting — the 201 must not block on
+            //    sharp/Appwrite. A failed enqueue only logs: the photo reads
+            //    as QUEUED and the retry endpoint recovers it.
+            let derivatives: DbDerivative[] = [];
+            try {
+              derivatives = await enqueuePhotoDerivatives(env, photo.id);
+            } catch (enqueueErr) {
+              console.error("Derivative enqueue failed:", (enqueueErr as Error).message);
+            }
+            kickDerivativeWorker(env);
+            uploaded.push(serializePhoto(photo, env, derivatives));
           } catch (metaErr) {
             await deletePhotoQuietly(env, stored.storageFileId);
             throw metaErr;
@@ -566,8 +596,13 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       uploadedBy: ctx.user.role === "TEAM_MEMBER" ? ctx.user.id : undefined,
       order: parsed.data.order,
     });
+    // One query for every photo's derivatives — never per-photo fan-out.
+    const derivativeMap = await getDerivativesForPhotos(
+      env,
+      page.photos.map((p) => p.id)
+    );
     res.json({
-      photos: page.photos.map((p) => serializePhoto(p, env)),
+      photos: page.photos.map((p) => serializePhoto(p, env, derivativeMap.get(p.id) ?? [])),
       pagination: serializePhotoPage(page, parsed.data.limit),
     });
   }) as unknown as import("express").RequestHandler);
@@ -588,11 +623,50 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       res.status(404).json({ error: "Photo not found" });
       return;
     }
-    // 1. Remove the binary first (worst case: orphaned object, no dead link
-    //    serving a deleted photo), then the metadata row.
+    // 1. Remove the binaries first (original + READY derivatives; worst
+    //    case: orphaned objects, no dead link serving a deleted photo),
+    //    then the metadata rows (derivative rows cascade from the photo).
     await deletePhotoQuietly(env, photo.storage_file_id);
+    const doomed = await getDerivativesForPhotos(env, [photo.id]);
+    await Promise.all(
+      (doomed.get(photo.id) ?? []).map((d) => deletePhotoQuietly(env, d.storage_file_id))
+    );
     await deletePhoto(env, photo.id);
     res.status(204).send();
+  }) as unknown as import("express").RequestHandler);
+
+  /**
+   * Retry a photo's derivative pipeline (ADMIN only, workspace-scoped
+   * through the photo's event). Ensures rows exist, resets FAILED rows to
+   * QUEUED with a fresh attempt budget, keeps READY rows untouched, and
+   * triggers the background sweep. The recovery path for visible failures.
+   */
+  router.post("/photos/:photoId/derivatives/retry", requireRole(env, "ADMIN"), (async (
+    req: Request,
+    res: Response
+  ) => {
+    const actor = await resolveAppUser(env, req);
+    const photo = await getPhotoById(env, String(req.params.photoId));
+    if (!photo) {
+      res.status(404).json({ error: "Photo not found" });
+      return;
+    }
+    const event = await getWorkspaceEvent(env, photo.event_id, actor.workspace_id);
+    if (!event) {
+      res.status(404).json({ error: "Photo not found" });
+      return;
+    }
+    const derivatives = await requeuePhotoDerivatives(env, photo.id);
+    res.json({
+      photo_id: photo.id,
+      processing_status: summarizeProcessingStatus(derivatives),
+      derivatives: derivatives.map((d) => ({
+        variant: d.variant,
+        status: d.status,
+        attempts: d.attempts,
+        last_error: d.last_error,
+      })),
+    });
   }) as unknown as import("express").RequestHandler);
 
   // ------------------------------------------------------------------
@@ -897,11 +971,17 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     // receives a raw storage URL.
     const expiresAt = Date.now() + GALLERY_TOKEN_TTL_MS;
     const accessToken = signGalleryAccessToken(env, slug, expiresAt);
+    const derivativeMap = await getDerivativesForPhotos(
+      env,
+      page.photos.map((p) => p.id)
+    );
     res.json({
       gallery: serializePublicGallery(gallery, totalCount),
       access_token: accessToken,
       expires_at: new Date(expiresAt).toISOString(),
-      photos: page.photos.map((p) => serializePublicPhoto(p, slug, accessToken)),
+      photos: page.photos.map((p) =>
+        serializePublicPhoto(p, slug, accessToken, derivativeMap.get(p.id) ?? [])
+      ),
       pagination: serializePhotoPage(page, pageParsed.data.limit),
     });
   }) as unknown as import("express").RequestHandler);
@@ -936,8 +1016,14 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       limit: parsed.data.limit,
       cursor: parsed.data.cursor,
     });
+    const derivativeMap = await getDerivativesForPhotos(
+      env,
+      page.photos.map((p) => p.id)
+    );
     res.json({
-      photos: page.photos.map((p) => serializePublicPhoto(p, slug, parsed.data.st)),
+      photos: page.photos.map((p) =>
+        serializePublicPhoto(p, slug, parsed.data.st, derivativeMap.get(p.id) ?? [])
+      ),
       pagination: serializePhotoPage(page, parsed.data.limit),
     });
   }) as unknown as import("express").RequestHandler);
@@ -946,13 +1032,20 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * Stream one gallery photo. The signed token from /unlock authorizes this
    * gallery for its TTL; the photo must belong to that gallery, and the
    * gallery must still be published. `dl=1` forces a download instead of
-   * inline display.
+   * inline display. `variant=thumb_small|thumb_large` serves the READY
+   * derivative instead of the original (409 while it is still processing,
+   * never a half-processed byte stream).
    */
   router.get("/public/galleries/:slug/photos/:photoId", (async (req: Request, res: Response) => {
     const slug = String(req.params.slug);
     const token = String(req.query.st ?? "");
     if (!verifyGalleryAccessToken(env, slug, token)) {
       res.status(403).json({ error: "This gallery session has expired. Enter the PIN again." });
+      return;
+    }
+    const variantParam = req.query.variant;
+    if (variantParam !== undefined && (typeof variantParam !== "string" || !isDerivativeVariant(variantParam))) {
+      res.status(400).json({ error: "Unknown thumbnail variant" });
       return;
     }
     const gallery = await getPublishedGalleryBySlug(env, slug);
@@ -970,11 +1063,24 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       res.status(404).json({ error: "Photo not found" });
       return;
     }
+    let storageFileId = photo.storage_file_id;
+    let mimeType = photo.mime_type;
+    let fileName = photo.filename;
+    if (variantParam !== undefined) {
+      const derivative = await getPhotoDerivative(env, photo.id, variantParam);
+      if (!derivative || derivative.status !== "READY") {
+        res.status(409).json({ error: "This thumbnail isn't ready yet. Try again shortly." });
+        return;
+      }
+      storageFileId = derivative.storage_file_id;
+      mimeType = derivative.mime_type;
+      fileName = `${photo.filename} (${derivative.variant})`;
+    }
     try {
-      const bytes = await readPhotoBytes(env, photo.storage_file_id);
-      const safeName = photo.filename.replace(/["\\\r\n]/g, "_");
+      const bytes = await readPhotoBytes(env, storageFileId);
+      const safeName = fileName.replace(/["\\\r\n]/g, "_");
       res.set({
-        "Content-Type": photo.mime_type,
+        "Content-Type": mimeType,
         "Content-Length": String(bytes.byteLength),
         "Cache-Control": "private, max-age=3600",
         "Content-Disposition": `${req.query.dl === "1" ? "attachment" : "inline"}; filename="${safeName}"`,
@@ -1058,7 +1164,7 @@ export function serializeGallery(g: DbGallery, photoCount: number) {
   };
 }
 
-export function serializePhoto(p: DbPhoto, appwriteEnv: Env) {
+export function serializePhoto(p: DbPhoto, appwriteEnv: Env, derivatives: DbDerivative[] = []) {
   return {
     id: p.id,
     event_id: p.event_id,
@@ -1072,6 +1178,15 @@ export function serializePhoto(p: DbPhoto, appwriteEnv: Env) {
     file_size: p.file_size,
     url: photoUrl(appwriteEnv, p.storage_file_id),
     download_url: photoDownloadUrl(appwriteEnv, p.storage_file_id),
+    // Derivative pipeline state — READY only when every variant is READY, so
+    // clients never treat a photo as fully processed early. Thumbnail URLs
+    // appear only for READY variants; otherwise the client uses url.
+    processing_status: summarizeProcessingStatus(derivatives),
+    derivatives: derivatives.map((d) => ({
+      variant: d.variant,
+      status: d.status,
+      url: d.status === "READY" ? photoUrl(appwriteEnv, d.storage_file_id) : null,
+    })),
     created_at: new Date(p.created_at).toISOString(),
   };
 }
@@ -1099,16 +1214,31 @@ export function serializePublicGallery(
 /**
  * Public photo shape: backend-proxied URLs carrying the unlock session's
  * signed token — no uploader attribution, no storage URLs, no ids beyond
- * the photo itself.
+ * the photo itself. Thumbnails resolve to the same proxy with ?variant=
+ * and appear only for READY derivatives (never present a photo as fully
+ * processed early).
  */
-export function serializePublicPhoto(p: DbPhoto, slug: string, token: string) {
+export function serializePublicPhoto(
+  p: DbPhoto,
+  slug: string,
+  token: string,
+  derivatives: DbDerivative[] = []
+) {
   const base = `/api/v1/public/galleries/${encodeURIComponent(slug)}/photos/${p.id}`;
   const st = encodeURIComponent(token);
+  const thumb = (variant: string): string | null => {
+    const ready = derivatives.some((d) => d.variant === variant && d.status === "READY");
+    return ready ? `${base}?st=${st}&variant=${variant}` : null;
+  };
   return {
     id: p.id,
     filename: p.filename,
     url: `${base}?st=${st}`,
     download_url: `${base}?st=${st}&dl=1`,
+    thumbnails: {
+      thumb_small: thumb("thumb_small"),
+      thumb_large: thumb("thumb_large"),
+    },
     created_at: new Date(p.created_at).toISOString(),
   };
 }

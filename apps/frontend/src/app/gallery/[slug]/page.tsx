@@ -70,10 +70,14 @@ function toMeta(g: PublicGalleryApi): GalleryMeta {
 function toPublicPhoto(p: PublicPhotoApi): Photo {
   // Photo bytes are proxied by the backend behind a signed token —
   // resolveAssetUrl prepends the API origin to the relative path.
+  // Grids prefer the large thumbnail once READY, with the full proxied
+  // original as the fallback and the lightbox source.
+  const thumb = p.thumbnails?.thumb_large ?? p.thumbnails?.thumb_small ?? null;
+  const gridUrl = thumb ?? p.url;
   return {
     id: p.id,
     eventId: "",
-    url: resolveAssetUrl(p.url),
+    url: resolveAssetUrl(gridUrl),
     fullUrl: resolveAssetUrl(p.url),
     downloadUrl: resolveAssetUrl(p.download_url),
     filename: p.filename,
