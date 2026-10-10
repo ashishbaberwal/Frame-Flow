@@ -150,9 +150,22 @@ export const api = {
   removeEventMember: (token: string | null, eventId: string, userId: string) =>
     apiFetch<void>(`/events/${eventId}/team-members/${userId}`, { method: "DELETE", token }),
 
-  // ---- Photos ----
-  listPhotos: (token: string | null, eventId: string) =>
-    apiFetch<{ photos: PhotoApi[] }>(`/events/${eventId}/photos`, { token }),
+  // ---- Photos (cursor-paginated; see backend PHOTO_PAGE_* limits) ----
+  listPhotos: (
+    token: string | null,
+    eventId: string,
+    params?: { limit?: number; cursor?: string; order?: "newest" | "oldest" }
+  ) => {
+    const search = new URLSearchParams();
+    if (params?.limit !== undefined) search.set("limit", String(params.limit));
+    if (params?.cursor) search.set("cursor", params.cursor);
+    if (params?.order) search.set("order", params.order);
+    const qs = search.toString();
+    return apiFetch<{ photos: PhotoApi[]; pagination: PaginationApi }>(
+      `/events/${eventId}/photos${qs ? `?${qs}` : ""}`,
+      { token }
+    );
+  },
   deletePhoto: (token: string | null, photoId: string) =>
     apiFetch<void>(`/photos/${photoId}`, { method: "DELETE", token }),
 
@@ -208,12 +221,86 @@ export const api = {
   // ---- Public gallery (customer surface — no Clerk token, PIN-verified server-side) ----
   getPublicGallery: (slug: string) =>
     apiFetch<{ gallery: PublicGalleryApi }>(`/public/galleries/${encodeURIComponent(slug)}`),
-  unlockGallery: (slug: string, pin: string) =>
-    apiFetch<{ gallery: PublicGalleryApi; photos: PublicPhotoApi[] }>(
-      `/public/galleries/${encodeURIComponent(slug)}/unlock`,
-      { method: "POST", body: { pin } }
-    ),
+  unlockGallery: (
+    slug: string,
+    pin: string,
+    params?: { limit?: number; cursor?: string }
+  ) => {
+    const search = new URLSearchParams();
+    if (params?.limit !== undefined) search.set("limit", String(params.limit));
+    if (params?.cursor) search.set("cursor", params.cursor);
+    const qs = search.toString();
+    return apiFetch<{
+      gallery: PublicGalleryApi;
+      photos: PublicPhotoApi[];
+      access_token: string;
+      expires_at: string;
+      pagination: PaginationApi;
+    }>(`/public/galleries/${encodeURIComponent(slug)}/unlock${qs ? `?${qs}` : ""}`, {
+      method: "POST",
+      body: { pin },
+    });
+  },
+  listPublicPhotos: (
+    slug: string,
+    accessToken: string,
+    params?: { limit?: number; cursor?: string }
+  ) => {
+    const search = new URLSearchParams({ st: accessToken });
+    if (params?.limit !== undefined) search.set("limit", String(params.limit));
+    if (params?.cursor) search.set("cursor", params.cursor);
+    return apiFetch<{ photos: PublicPhotoApi[]; pagination: PaginationApi }>(
+      `/public/galleries/${encodeURIComponent(slug)}/photos?${search.toString()}`
+    );
+  },
 };
+
+/** Cursor-pagination metadata returned alongside every photo list. */
+export interface PaginationApi {
+  limit: number;
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+/**
+ * Fetch every page of an event's photos, following cursors until the backend
+ * reports has_more: false. Requests stay bounded (one page at a time) while
+ * the UI keeps its existing show-everything behavior — no grid redesign.
+ */
+export async function listAllPhotos(
+  token: string | null,
+  eventId: string,
+  order: "newest" | "oldest" = "newest"
+): Promise<{ photos: PhotoApi[] }> {
+  const photos: PhotoApi[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await api.listPhotos(token, eventId, { limit: 100, cursor, order });
+    photos.push(...page.photos);
+    if (!page.pagination.has_more || !page.pagination.next_cursor) break;
+    cursor = page.pagination.next_cursor;
+  }
+  return { photos };
+}
+
+/**
+ * Fetch every page of an unlocked public gallery using the signed session
+ * token from unlock — no re-PIN. Pages are appended in curation order.
+ */
+export async function listAllPublicPhotos(
+  slug: string,
+  accessToken: string
+): Promise<{ photos: PublicPhotoApi[] }> {
+  const photos: PublicPhotoApi[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await api.listPublicPhotos(slug, accessToken, { limit: 100, cursor });
+    photos.push(...page.photos);
+    if (!page.pagination.has_more || !page.pagination.next_cursor) break;
+    cursor = page.pagination.next_cursor;
+  }
+  return { photos };
+}
 
 /**
  * Upload photos with real progress events. fetch() has no upload progress,

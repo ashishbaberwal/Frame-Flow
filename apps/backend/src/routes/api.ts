@@ -30,8 +30,11 @@ import {
   listEventGalleriesWithCounts,
   listEventMembers,
   listEventPhotos,
+  listEventPhotosPaginated,
   listEventsForUser,
-  listGalleryPhotos,
+  listGalleryPhotosPaginated,
+  isValidEventCursor,
+  isValidGalleryCursor,
   listPendingInvitationsForWorkspace,
   listWorkspaceUsers,
   markInvitationAccepted,
@@ -43,6 +46,8 @@ import {
   updateEvent,
   updateGalleryPin,
   upsertUserFromClerk,
+  PHOTO_PAGE_DEFAULT_LIMIT,
+  PHOTO_PAGE_MAX_LIMIT,
   type DbEvent,
   type DbGallery,
   type DbInvitation,
@@ -100,6 +105,42 @@ const unlockGallerySchema = z.object({
 });
 
 const setPinSchema = unlockGallerySchema;
+
+const photoPageQuerySchema = z.object({
+  limit: z
+    .string()
+    .optional()
+    .refine(
+      (v) =>
+        v === undefined || (/^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= PHOTO_PAGE_MAX_LIMIT),
+      `limit must be an integer 1–${PHOTO_PAGE_MAX_LIMIT}`
+    )
+    .transform((v) => (v === undefined ? PHOTO_PAGE_DEFAULT_LIMIT : Number(v))),
+  cursor: z.string().min(1).max(2000).optional(),
+  order: z.enum(["newest", "oldest"]).optional().default("newest"),
+});
+
+const publicPhotoPageQuerySchema = z.object({
+  st: z.string().min(1).max(2000),
+  limit: z
+    .string()
+    .optional()
+    .refine(
+      (v) =>
+        v === undefined || (/^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= PHOTO_PAGE_MAX_LIMIT),
+      `limit must be an integer 1–${PHOTO_PAGE_MAX_LIMIT}`
+    )
+    .transform((v) => (v === undefined ? PHOTO_PAGE_DEFAULT_LIMIT : Number(v))),
+  cursor: z.string().min(1).max(2000).optional(),
+});
+
+function serializePhotoPage(page: { nextCursor: string | null; hasMore: boolean }, limit: number) {
+  return {
+    limit,
+    next_cursor: page.nextCursor,
+    has_more: page.hasMore,
+  };
+}
 
 /**
  * Resolve the Postgres row for the verified Clerk identity on the request.
@@ -507,12 +548,28 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
   router.get("/events/:eventId/photos", (async (req: Request, res: Response) => {
     const ctx = await authorizeEventAccess(req, res);
     if (!ctx) return;
-    const photos = await listEventPhotos(
-      env,
-      ctx.event.id,
-      ctx.user.role === "TEAM_MEMBER" ? ctx.user.id : undefined
-    );
-    res.json({ photos: photos.map((p) => serializePhoto(p, env)) });
+    // Cursor pagination: ?limit= (1–100, default 50), ?cursor= (opaque),
+    // ?order=newest|oldest (default newest). Ordering is stable
+    // (created_at, id) so concurrent uploads cannot duplicate/skip rows.
+    const parsed = photoPageQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid pagination parameters" });
+      return;
+    }
+    if (parsed.data.cursor && !isValidEventCursor(parsed.data.cursor)) {
+      res.status(400).json({ error: "Invalid pagination parameters" });
+      return;
+    }
+    const page = await listEventPhotosPaginated(env, ctx.event.id, {
+      limit: parsed.data.limit,
+      cursor: parsed.data.cursor,
+      uploadedBy: ctx.user.role === "TEAM_MEMBER" ? ctx.user.id : undefined,
+      order: parsed.data.order,
+    });
+    res.json({
+      photos: page.photos.map((p) => serializePhoto(p, env)),
+      pagination: serializePhotoPage(page, parsed.data.limit),
+    });
   }) as unknown as import("express").RequestHandler);
 
   router.delete("/photos/:photoId", requireRole(env, "ADMIN"), (async (
@@ -776,11 +833,39 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * Verify the PIN and return the gallery's photos. Rate limited per
    * slug+IP: 5 wrong attempts per 15 minutes. PIN comparison is
    * timing-safe; the PIN itself never appears in any response.
+   *
+   * The photo list is cursor-paginated (?limit=, ?cursor=) in curation
+   * order; the response carries { photos, pagination } plus the total in
+   * gallery.photo_count. Follow-up pages use
+   * GET /public/galleries/:slug/photos with the access_token — no re-PIN.
    */
   router.post("/public/galleries/:slug/unlock", (async (req: Request, res: Response) => {
     const parsed = unlockGallerySchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Enter the 6-digit PIN" });
+      return;
+    }
+    const pageParsed = z
+      .object({
+        limit: z
+          .string()
+          .optional()
+          .refine(
+            (v) =>
+              v === undefined ||
+              (/^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= PHOTO_PAGE_MAX_LIMIT),
+            `limit must be an integer 1–${PHOTO_PAGE_MAX_LIMIT}`
+          )
+          .transform((v) => (v === undefined ? PHOTO_PAGE_DEFAULT_LIMIT : Number(v))),
+        cursor: z.string().min(1).max(2000).optional(),
+      })
+      .safeParse(req.query);
+    if (!pageParsed.success) {
+      res.status(400).json({ error: "Invalid pagination parameters" });
+      return;
+    }
+    if (pageParsed.data.cursor && !isValidGalleryCursor(pageParsed.data.cursor)) {
+      res.status(400).json({ error: "Invalid pagination parameters" });
       return;
     }
     const slug = String(req.params.slug);
@@ -802,17 +887,58 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       return;
     }
     clearFailures(key);
-    const photos = await listGalleryPhotos(env, gallery.id);
+    const page = await listGalleryPhotosPaginated(env, gallery.id, {
+      limit: pageParsed.data.limit,
+      cursor: pageParsed.data.cursor,
+    });
+    const totalCount = await countGalleryPhotos(env, gallery.id);
     // A successful unlock mints a signed, expiring token. Photo bytes are
-    // then served by the backend (see the route below) — the client never
+    // then served by the backend (see the routes below) — the client never
     // receives a raw storage URL.
     const expiresAt = Date.now() + GALLERY_TOKEN_TTL_MS;
     const accessToken = signGalleryAccessToken(env, slug, expiresAt);
     res.json({
-      gallery: serializePublicGallery(gallery, photos.length),
+      gallery: serializePublicGallery(gallery, totalCount),
       access_token: accessToken,
       expires_at: new Date(expiresAt).toISOString(),
-      photos: photos.map((p) => serializePublicPhoto(p, slug, accessToken)),
+      photos: page.photos.map((p) => serializePublicPhoto(p, slug, accessToken)),
+      pagination: serializePhotoPage(page, pageParsed.data.limit),
+    });
+  }) as unknown as import("express").RequestHandler);
+
+  /**
+   * Paginated public photo list for an unlocked gallery session. Same signed
+   * token as /unlock (`?st=`), same published + membership gates, curation
+   * order. Lets customers page through large galleries without re-entering
+   * the PIN. Draft galleries 404 like the rest of the public surface.
+   */
+  router.get("/public/galleries/:slug/photos", (async (req: Request, res: Response) => {
+    const parsed = publicPhotoPageQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid pagination parameters" });
+      return;
+    }
+    if (parsed.data.cursor && !isValidGalleryCursor(parsed.data.cursor)) {
+      res.status(400).json({ error: "Invalid pagination parameters" });
+      return;
+    }
+    const slug = String(req.params.slug);
+    if (!verifyGalleryAccessToken(env, slug, parsed.data.st)) {
+      res.status(403).json({ error: "This gallery session has expired. Enter the PIN again." });
+      return;
+    }
+    const gallery = await getPublishedGalleryBySlug(env, slug);
+    if (!gallery) {
+      res.status(404).json({ error: "Gallery not found" });
+      return;
+    }
+    const page = await listGalleryPhotosPaginated(env, gallery.id, {
+      limit: parsed.data.limit,
+      cursor: parsed.data.cursor,
+    });
+    res.json({
+      photos: page.photos.map((p) => serializePublicPhoto(p, slug, parsed.data.st)),
+      pagination: serializePhotoPage(page, parsed.data.limit),
     });
   }) as unknown as import("express").RequestHandler);
 

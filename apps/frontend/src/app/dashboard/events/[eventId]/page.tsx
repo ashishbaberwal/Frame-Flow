@@ -22,7 +22,7 @@ import {
 import { toast } from "sonner";
 
 import { formatDate, formatNumber, timeAgo } from "@/lib/utils";
-import { api, ApiError, toGallery, toPhoto, toTeamMember } from "@/lib/api/client";
+import { api, ApiError, listAllPhotos, toGallery, toPhoto, toTeamMember } from "@/lib/api/client";
 import { useAuth } from "@clerk/nextjs";
 import { useCurrentUserState } from "@/lib/api/use-current-user";
 import type { Event, EventStatus, Gallery, Photo, TeamMember } from "@/types";
@@ -109,8 +109,7 @@ export default function EventDetailPage() {
             )
           )
           .catch(() => [] as Gallery[]),
-        api
-          .listPhotos(token, eventId)
+        listAllPhotos(token, eventId)
           .then((r) => r.photos.map((p) => toPhoto(p)))
           .catch(() => [] as Photo[]),
       ]);

@@ -14,7 +14,7 @@ import { useAuth } from "@clerk/nextjs";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 
 import { cn, formatNumber } from "@/lib/utils";
-import { api, ApiError, toPhoto } from "@/lib/api/client";
+import { api, ApiError, listAllPhotos, toPhoto } from "@/lib/api/client";
 import { useCurrentUserState } from "@/lib/api/use-current-user";
 import type { Photo } from "@/types";
 import { AppShell } from "@/components/dashboard/app-shell";
@@ -75,7 +75,7 @@ export default function PhotosPage() {
     try {
       const token = await getToken();
       const [data, eventRes] = await Promise.all([
-        api.listPhotos(token, eventId),
+        listAllPhotos(token, eventId),
         api
           .getEvent(token, eventId)
           .then((r) => r.event.name)
@@ -105,7 +105,7 @@ export default function PhotosPage() {
       setError(null);
       try {
         const token = await getToken();
-        const data = await api.listPhotos(token, eventId);
+        const data = await listAllPhotos(token, eventId);
         if (cancelled) return;
         setPhotos(data.photos.map((p) => toPhoto(p)));
       } catch (err) {
