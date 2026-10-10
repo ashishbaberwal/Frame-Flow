@@ -178,6 +178,30 @@ Errors use a consistent response shape:
 
 Internal error details are logged server-side and are not returned to clients.
 
+### Photo pagination
+
+Photo lists are cursor-paginated — event collections and the public gallery
+surface never return unbounded arrays:
+
+```text
+GET /api/v1/events/:eventId/photos?limit=50&cursor=<opaque>&order=newest|oldest
+POST /api/v1/public/galleries/:slug/unlock?limit=50&cursor=<opaque>  { pin }
+GET /api/v1/public/galleries/:slug/photos?st=<token>&limit=50&cursor=<opaque>
+```
+
+- `limit` is 1–100 (default 50); anything else is `400`.
+- `cursor` is an opaque base64url token from the previous page's
+  `pagination.next_cursor`; malformed cursors are `400`.
+- Every list responds `{ photos: [...], pagination: { limit, next_cursor,
+  has_more } }`. Follow `next_cursor` while `has_more` is true.
+- Event ordering is stable (`created_at`, `id`); gallery ordering follows
+  curation order (`added_at`, `photo_id`). Same-millisecond uploads cannot
+  duplicate or skip rows across pages.
+- Authorization is unchanged: workspace/event gates run before pagination,
+  and the public follow-up endpoint re-verifies the signed unlock token.
+- The unlock response keeps its shape (`gallery`, `access_token`,
+  `expires_at`) and adds `pagination`; `gallery.photo_count` is the total.
+
 ## Security model
 
 - Clerk is the only identity provider. Supabase Auth and custom JWTs are not
@@ -391,7 +415,7 @@ and runs the verification pipeline on pushes to `main` and pull requests.
 - Rate limiting is in-memory and therefore per backend process.
 - Authenticated dashboard previews use Appwrite view URLs; public gallery
   photos use the signed backend proxy.
-- Photo grids load the complete event set; thumbnails and pagination are not
+- Photo grids page through cursor-paginated APIs; thumbnails are not
   implemented yet.
 - Bulk ZIP downloads, gallery expiry, and gallery unpublish are not included.
 

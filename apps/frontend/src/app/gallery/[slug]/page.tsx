@@ -125,10 +125,22 @@ export default function CustomerGalleryPage() {
     setPinMessage(null);
     try {
       const res = await api.unlockGallery(slug, code);
-      if (res.photos.length === 0) {
+      // Unlock returns the first page; large galleries page behind the
+      // signed session token with no re-PIN. UI behavior is unchanged —
+      // pages are appended before the first render of the grid.
+      const all = [...res.photos];
+      let cursor = res.pagination?.next_cursor ?? null;
+      let hasMore = res.pagination?.has_more ?? false;
+      while (hasMore && cursor) {
+        const next = await api.listPublicPhotos(slug, res.access_token, { cursor });
+        all.push(...next.photos);
+        hasMore = next.pagination.has_more;
+        cursor = next.pagination.next_cursor;
+      }
+      if (all.length === 0) {
         setGate({ state: "empty", meta: toMeta(res.gallery) });
       } else {
-        setGate({ state: "viewing", meta: toMeta(res.gallery), photos: res.photos.map(toPublicPhoto) });
+        setGate({ state: "viewing", meta: toMeta(res.gallery), photos: all.map(toPublicPhoto) });
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {

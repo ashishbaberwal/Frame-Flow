@@ -287,10 +287,155 @@ export async function listEventPhotos(
      FROM photos p
      LEFT JOIN users u ON u.id = p.uploaded_by
      WHERE p.event_id = $1 ${uploaderFilter}
-     ORDER BY p.created_at DESC`,
+     ORDER BY p.created_at DESC, p.id DESC`,
     params
   );
   return result.rows;
+}
+
+// ---------------------------------------------------------------------------
+// Cursor pagination for photo collections (Phase 1).
+//
+// Cursors are opaque base64url JSON — never raw timestamps/IDs in the URL.
+// Event photos page by (created_at, id); gallery photos by (added_at,
+// photo_id). Both orderings are stable: equal timestamps fall back to the
+// unique ID tiebreak, so inserts between page fetches cannot duplicate or
+// skip rows the way OFFSET would.
+// ---------------------------------------------------------------------------
+
+/** Default page size when the client omits ?limit=. */
+export const PHOTO_PAGE_DEFAULT_LIMIT = 50;
+/** Hard ceiling — the API 400s above this instead of reading unbounded rows. */
+export const PHOTO_PAGE_MAX_LIMIT = 100;
+
+export type PhotoPage = {
+  photos: DbPhoto[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
+function encodePhotoCursor(payload: unknown): string {
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+}
+
+function decodePhotoCursor<T>(cursor: string): T | null {
+  try {
+    const json = Buffer.from(cursor, "base64url").toString("utf8");
+    const parsed = JSON.parse(json) as T;
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Strict cursor validation for routes: a provided cursor must decode to the
+ * expected shape with a valid timestamp. Garbage cursors 400 (client bug),
+ * they never silently restart the listing.
+ */
+export function isValidEventCursor(cursor: string): boolean {
+  const parsed = decodePhotoCursor<EventPhotoCursor>(cursor);
+  if (!parsed || typeof parsed.c !== "string" || typeof parsed.id !== "string") return false;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsed.id))
+    return false;
+  return !Number.isNaN(new Date(parsed.c).getTime());
+}
+
+/** Strict cursor validation for gallery pages (added_at + photo_id). */
+export function isValidGalleryCursor(cursor: string): boolean {
+  const parsed = decodePhotoCursor<GalleryPhotoCursor>(cursor);
+  if (!parsed || typeof parsed.a !== "string" || typeof parsed.id !== "string") return false;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsed.id))
+    return false;
+  return !Number.isNaN(new Date(parsed.a).getTime());
+}
+
+export type EventPhotoCursor = { c: string; id: string };
+
+/**
+ * One page of an event's photos, newest or oldest first. The caller (route)
+ * validates limit/cursor/order and returns 400 on bad input; this function
+ * clamps defensively and treats an undecodable cursor as the first page so
+ * direct DB callers cannot throw on user input.
+ */
+export async function listEventPhotosPaginated(
+  env: Env,
+  eventId: string,
+  options: {
+    limit?: number;
+    cursor?: string;
+    uploadedBy?: string;
+    order?: "newest" | "oldest";
+  } = {}
+): Promise<PhotoPage> {
+  const order = options.order ?? "newest";
+  const desc = order === "newest";
+  const limit = Math.min(
+    Math.max(Math.floor(options.limit ?? PHOTO_PAGE_DEFAULT_LIMIT), 1),
+    PHOTO_PAGE_MAX_LIMIT
+  );
+
+  let cursorAt: string | null = null;
+  let cursorId: string | null = null;
+  if (options.cursor) {
+    const parsed = decodePhotoCursor<EventPhotoCursor>(options.cursor);
+    if (parsed && typeof parsed.c === "string" && typeof parsed.id === "string") {
+      const at = new Date(parsed.c);
+      if (!Number.isNaN(at.getTime())) {
+        cursorAt = at.toISOString();
+        cursorId = parsed.id;
+      }
+    }
+  }
+
+  const params: unknown[] = [eventId];
+  let idx = 2;
+  let uploaderFilter = "";
+  if (options.uploadedBy) {
+    uploaderFilter = `AND p.uploaded_by = $${idx++}`;
+    params.push(options.uploadedBy);
+  }
+  // Timestamps compare at millisecond precision on BOTH sides.
+  // Postgres stores microseconds but JS Dates (and ISO cursors) only carry
+  // milliseconds — comparing raw added_at against a truncated cursor would
+  // re-emit rows that share the cursor's millisecond (same-batch uploads get
+  // identical now() values). date_trunc on the column matches the cursor's
+  // precision exactly; the unique ID tiebreak keeps the order stable.
+  // ORDER BY uses the same expression so the cursor and sort agree.
+  const orderDir = desc ? "DESC" : "ASC";
+  const cmpOp = desc ? "<" : ">";
+  let cursorFilter = "";
+  if (cursorAt && cursorId) {
+    cursorFilter = `AND (date_trunc('milliseconds', p.created_at), p.id) ${cmpOp} (date_trunc('milliseconds', $${idx}::timestamptz), $${idx + 1}::uuid)`;
+    params.push(cursorAt, cursorId);
+    idx += 2;
+  }
+  params.push(limit + 1);
+
+  const result = await getPool(env).query<DbPhoto>(
+    `SELECT p.*,
+            COALESCE(NULLIF(u.name, ''), u.email) AS uploader_name,
+            u.role AS uploader_role
+     FROM photos p
+     LEFT JOIN users u ON u.id = p.uploaded_by
+     WHERE p.event_id = $1 ${uploaderFilter} ${cursorFilter}
+     ORDER BY date_trunc('milliseconds', p.created_at) ${orderDir}, p.id ${orderDir}
+     LIMIT $${idx}`,
+    params
+  );
+
+  const hasMore = result.rows.length > limit;
+  const page = hasMore ? result.rows.slice(0, limit) : result.rows;
+  const last = page[page.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? encodePhotoCursor({
+          c: new Date(last.created_at).toISOString(),
+          id: last.id,
+        } satisfies EventPhotoCursor)
+      : null;
+  return { photos: page, nextCursor, hasMore };
 }
 
 export async function getPhotoById(env: Env, id: string): Promise<DbPhoto | null> {
@@ -394,10 +539,79 @@ export async function listGalleryPhotos(env: Env, galleryId: string): Promise<Db
      FROM photos p
      JOIN gallery_photos gp ON gp.photo_id = p.id
      WHERE gp.gallery_id = $1
-     ORDER BY gp.added_at ASC`,
+     ORDER BY gp.added_at ASC, gp.photo_id ASC`,
     [galleryId]
   );
   return result.rows;
+}
+
+export type GalleryPhotoCursor = { a: string; id: string };
+
+/**
+ * One page of a gallery's photos in curation order. Cursor pages by
+ * (added_at, photo_id) so re-curation between fetches cannot duplicate or
+ * skip rows. Returns the same photo rows as listGalleryPhotos (the
+ * curation timestamp is used for the cursor only, never exposed).
+ */
+export async function listGalleryPhotosPaginated(
+  env: Env,
+  galleryId: string,
+  options: { limit?: number; cursor?: string } = {}
+): Promise<PhotoPage> {
+  const limit = Math.min(
+    Math.max(Math.floor(options.limit ?? PHOTO_PAGE_DEFAULT_LIMIT), 1),
+    PHOTO_PAGE_MAX_LIMIT
+  );
+
+  let cursorAt: string | null = null;
+  let cursorId: string | null = null;
+  if (options.cursor) {
+    const parsed = decodePhotoCursor<GalleryPhotoCursor>(options.cursor);
+    if (parsed && typeof parsed.a === "string" && typeof parsed.id === "string") {
+      const at = new Date(parsed.a);
+      if (!Number.isNaN(at.getTime())) {
+        cursorAt = at.toISOString();
+        cursorId = parsed.id;
+      }
+    }
+  }
+
+  const params: unknown[] = [galleryId];
+  let cursorFilter = "";
+  if (cursorAt && cursorId) {
+    // Millisecond-truncated comparison on both sides — see
+    // listEventPhotosPaginated for why raw microsecond values would
+    // re-emit same-millisecond rows (gallery association writes every row
+    // with one identical now() timestamp).
+    cursorFilter = `AND (date_trunc('milliseconds', gp.added_at), gp.photo_id) > (date_trunc('milliseconds', $2::timestamptz), $3::uuid)`;
+    params.push(cursorAt, cursorId);
+  }
+  params.push(limit + 1);
+  const limitParam = params.length;
+
+  const result = await getPool(env).query<DbPhoto & { gallery_added_at: Date }>(
+    `SELECT p.*, gp.added_at AS gallery_added_at
+     FROM photos p
+     JOIN gallery_photos gp ON gp.photo_id = p.id
+     WHERE gp.gallery_id = $1 ${cursorFilter}
+     ORDER BY date_trunc('milliseconds', gp.added_at) ASC, gp.photo_id ASC
+     LIMIT $${limitParam}`,
+    params
+  );
+
+  const hasMore = result.rows.length > limit;
+  const page = hasMore ? result.rows.slice(0, limit) : result.rows;
+  const last = page[page.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? encodePhotoCursor({
+          a: new Date(last.gallery_added_at).toISOString(),
+          id: last.id,
+        } satisfies GalleryPhotoCursor)
+      : null;
+  // Strip the cursor-only column before returning photo rows.
+  const photos = page.map(({ gallery_added_at: _, ...photo }) => photo);
+  return { photos, nextCursor, hasMore };
 }
 
 /** Galleries of an event, newest first (event is already workspace-scoped). */
