@@ -66,6 +66,7 @@ import {
   summarizeProcessingStatus,
   type DbDerivative,
 } from "../lib/derivatives.js";
+import { getDerivativeQueue } from "../lib/queue.js";
 import type { AuthedRequest } from "../middleware/auth.js";
 import { requireRole } from "../middleware/auth.js";
 import { HttpError } from "../middleware/error.js";
@@ -210,12 +211,34 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
   }) as unknown as import("express").RequestHandler);
 
   /**
+   * Thumbnail queue observability (ADMIN only): BullMQ job counts so stuck
+   * or failed jobs are identifiable without Redis access. Reports
+   * configured:false when REDIS_URL is unset (in-process fallback active);
+   * 503 when Redis is configured but unreachable.
+   */
+  router.get("/queues/derivatives", requireRole(env, "ADMIN"), (async (
+    _req: Request,
+    res: Response
+  ) => {
+    const queue = getDerivativeQueue(env);
+    if (!queue) {
+      res.json({ configured: false });
+      return;
+    }
+    try {
+      const counts = await queue.getJobCounts();
+      res.json({ configured: true, counts });
+    } catch {
+      res.status(503).json({ error: "Queue unavailable" });
+    }
+  }) as unknown as import("express").RequestHandler);
+
+  /**
    * Real aggregates for the dashboard overview. Admins see the workspace;
    * team members see only their assigned events, and people-counts are
    * withheld (null) so the client can hide those cards.
    */
-  router.get("/stats", (async (req: Request, res: Response) => {
-    const user = await resolveAppUser(env, req);
+  router.get("/stats", (async (req: Request, res: Response) => {    const user = await resolveAppUser(env, req);
     const memberScope = user.role === "ADMIN" ? undefined : user.id;
     const [stats, uploadsPerDay, activity] = await Promise.all([
       getDashboardStats(env, user.workspace_id, memberScope),

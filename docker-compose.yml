@@ -1,0 +1,22 @@
+name: frameflow
+
+# Local infrastructure for development and tests.
+# Phase 3 starts with Redis only (BullMQ thumbnail jobs). Kafka (analytics)
+# and Prometheus/Grafana (observability) get their own services in later
+# phases. Production uses managed equivalents — never this file.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - frameflow-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  frameflow-redis:
