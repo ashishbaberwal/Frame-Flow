@@ -92,9 +92,20 @@ describeIf(hasDb)("Analytics pipeline", () => {
 
   afterAll(async () => {
     await resetAnalyticsProducer();
-    await getPool(env)
+    const pool = getPool(env);
+    await pool
       .query("DELETE FROM analytics_event_log WHERE workspace_id = $1", [WORKSPACE_ID])
       .catch(() => undefined);
+    for (const table of [
+      "gallery_traffic_visitors",
+      "gallery_traffic_sources",
+      "gallery_visitor_days",
+      "gallery_daily_stats",
+    ]) {
+      await pool.query(`DELETE FROM ${table} WHERE workspace_id = $1`, [WORKSPACE_ID]).catch(
+        () => undefined
+      );
+    }
     await closePool();
   });
 
@@ -151,6 +162,59 @@ describeIf(hasDb)("Analytics pipeline", () => {
     );
     expect(rows.rows.length).toBe(1);
     expect(rows.rows[0]!.photo_id).toBe(PHOTO_ID);
+  });
+
+  it("consumer aggregates a GalleryViewed exactly once", async () => {
+    const event = makeGalleryViewed({
+      ...base(),
+      visitorId: "81111111-1111-4111-8111-111111111111",
+      photoCount: 7,
+    });
+    expect(await processAnalyticsRecord(env, event)).toBe("stored");
+    expect(await processAnalyticsRecord(env, event)).toBe("duplicate");
+
+    const stats = await getPool(env).query<{ views: number; unique_visitors: number }>(
+      "SELECT views, unique_visitors FROM gallery_daily_stats WHERE gallery_id = $1",
+      [GALLERY_ID]
+    );
+    expect(stats.rows).toEqual([{ views: 1, unique_visitors: 1 }]);
+    const sources = await getPool(env).query<{ views: number; unique_visitors: number }>(
+      "SELECT views, unique_visitors FROM gallery_traffic_sources WHERE gallery_id = $1 AND source = 'direct'",
+      [GALLERY_ID]
+    );
+    expect(sources.rows).toEqual([{ views: 1, unique_visitors: 1 }]);
+  });
+
+  it("concurrent redelivery of one event counts once", async () => {
+    const event = makeGalleryViewed({ ...base(), photoCount: 2 });
+    const outcomes = await Promise.all(
+      Array.from({ length: 10 }, () => processAnalyticsRecord(env, event))
+    );
+    expect(outcomes.filter((o) => o === "stored").length).toBe(1);
+    expect(outcomes.filter((o) => o === "duplicate").length).toBe(9);
+
+    // This file's earlier tests stored other views for the same gallery; the
+    // redelivered event contributed exactly one view overall.
+    const log = await getPool(env).query<{ n: number }>(
+      "SELECT COUNT(*)::int AS n FROM analytics_event_log WHERE event_id = $1",
+      [event.eventId]
+    );
+    expect(log.rows[0]!.n).toBe(1);
+  });
+
+  it("non-view events store without touching aggregates", async () => {
+    const before = await getPool(env).query<{ n: number }>(
+      "SELECT COUNT(*)::int AS n FROM gallery_daily_stats WHERE gallery_id = $1",
+      [GALLERY_ID]
+    );
+    expect(await processAnalyticsRecord(env, makePhotoViewed({ ...base(), photoId: PHOTO_ID }))).toBe(
+      "stored"
+    );
+    const after = await getPool(env).query<{ n: number }>(
+      "SELECT COUNT(*)::int AS n FROM gallery_daily_stats WHERE gallery_id = $1",
+      [GALLERY_ID]
+    );
+    expect(after.rows[0]!.n).toBe(before.rows[0]!.n);
   });
 });
 

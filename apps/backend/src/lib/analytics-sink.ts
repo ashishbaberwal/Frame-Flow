@@ -1,4 +1,5 @@
 import type { Env } from "../config/env.js";
+import { aggregateGalleryViewed } from "./analytics-aggregates.js";
 import { validateAnalyticsEvent, type AnalyticsEvent } from "./analytics-events.js";
 import { getPool } from "./db.js";
 
@@ -27,7 +28,26 @@ export async function processAnalyticsRecord(
     log("skipped-invalid", checked.error);
     return "invalid";
   }
-  return storeAnalyticsEvent(env, checked.event);
+  // One transaction per event: the raw insert and its rollups commit atomically,
+  // so a crash can never store an event without its aggregates or vice versa.
+  // Duplicates (same event_id) commit a no-op — counters never move. Any real
+  // DB failure rolls back and THROWS: the worker must not resolve the offset,
+  // and the batch redelivers after restart.
+  const client = await getPool(env).connect();
+  try {
+    await client.query("BEGIN");
+    const stored = await insertAnalyticsEvent(client, checked.event);
+    if (stored && checked.event.eventType === "GalleryViewed") {
+      await aggregateGalleryViewed(client, checked.event);
+    }
+    await client.query("COMMIT");
+    return stored ? "stored" : "duplicate";
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /** Insert a validated event. ON CONFLICT DO NOTHING is the dedupe point. */
@@ -35,6 +55,18 @@ export async function storeAnalyticsEvent(
   env: Env,
   event: AnalyticsEvent
 ): Promise<"stored" | "duplicate"> {
+  const client = await getPool(env).connect();
+  try {
+    return (await insertAnalyticsEvent(client, event)) ? "stored" : "duplicate";
+  } finally {
+    client.release();
+  }
+}
+
+async function insertAnalyticsEvent(
+  client: import("pg").PoolClient,
+  event: AnalyticsEvent
+): Promise<boolean> {
   const photoId =
     event.eventType === "PhotoViewed" || event.eventType === "PhotoDownloaded"
       ? event.photoId
@@ -44,7 +76,7 @@ export async function storeAnalyticsEvent(
       ? event.photoCount
       : null;
   const channel = event.eventType === "GalleryShared" ? event.channel : null;
-  const result = await getPool(env).query(
+  const result = await client.query(
     `INSERT INTO analytics_event_log
        (event_id, event_type, schema_version, occurred_at, gallery_id,
         workspace_id, visitor_id, correlation_id, traffic_source,
@@ -69,5 +101,5 @@ export async function storeAnalyticsEvent(
       JSON.stringify(event),
     ]
   );
-  return (result.rowCount ?? 0) > 0 ? "stored" : "duplicate";
+  return (result.rowCount ?? 0) > 0;
 }
