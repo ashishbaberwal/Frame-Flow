@@ -68,6 +68,16 @@ import {
 } from "../lib/derivatives.js";
 import { getDerivativeQueue } from "../lib/queue.js";
 import { publishDerivativeJobs } from "../lib/derivative-jobs.js";
+import {
+  makeGalleryViewed,
+  makePhotoDownloaded,
+  makePhotoViewed,
+  mintCorrelationId,
+  mintVisitorId,
+  normalizeTrafficSource,
+  parseVisitorId,
+} from "../lib/analytics-events.js";
+import { publishAnalyticsEvent } from "../lib/analytics-producer.js";
 import type { AuthedRequest } from "../middleware/auth.js";
 import { requireRole } from "../middleware/auth.js";
 import { HttpError } from "../middleware/error.js";
@@ -1021,15 +1031,37 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       env,
       page.photos.map((p) => p.id)
     );
+    // Analytics context, minted at unlock: echo a valid client visitor id or
+    // mint a pseudonymous one, plus a fresh correlation id that photo URLs
+    // carry back for session stitching. Never PINs, tokens, or raw referrers.
+    const visitorId = parseVisitorId(req.headers["x-visitor-id"]) ?? mintVisitorId();
+    const correlationId = mintCorrelationId();
+    const tracking = { visitorId, correlationId };
+    const trafficSource = normalizeTrafficSource(req.headers.referer, req.query as Record<string, unknown>);
     res.json({
       gallery: serializePublicGallery(gallery, totalCount),
       access_token: accessToken,
       expires_at: new Date(expiresAt).toISOString(),
+      visitor_id: visitorId,
+      correlation_id: correlationId,
       photos: page.photos.map((p) =>
-        serializePublicPhoto(p, slug, accessToken, derivativeMap.get(p.id) ?? [])
+        serializePublicPhoto(p, slug, accessToken, derivativeMap.get(p.id) ?? [], tracking)
       ),
       pagination: serializePhotoPage(page, pageParsed.data.limit),
     });
+    // Fire-and-forget AFTER the response: analytics must never delay or fail
+    // the unlock. publishAnalyticsEvent never throws; outages just log.
+    void publishAnalyticsEvent(
+      env,
+      makeGalleryViewed({
+        galleryId: gallery.id,
+        workspaceId: gallery.workspace_id,
+        visitorId,
+        correlationId,
+        trafficSource,
+        photoCount: totalCount,
+      })
+    );
   }) as unknown as import("express").RequestHandler);
 
   /**
@@ -1066,9 +1098,19 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       env,
       page.photos.map((p) => p.id)
     );
+    // Keep the unlock session's tracking onward: visitor from the header,
+    // correlation passed back by the client (?c=). Both re-validated.
+    const followVisitor = parseVisitorId(req.headers["x-visitor-id"]);
+    const followCorrelation =
+      typeof req.query.c === "string" && req.query.c.length >= 1 && req.query.c.length <= 200
+        ? req.query.c
+        : mintCorrelationId();
     res.json({
       photos: page.photos.map((p) =>
-        serializePublicPhoto(p, slug, parsed.data.st, derivativeMap.get(p.id) ?? [])
+        serializePublicPhoto(p, slug, parsed.data.st, derivativeMap.get(p.id) ?? [], {
+          visitorId: followVisitor,
+          correlationId: followCorrelation,
+        })
       ),
       pagination: serializePhotoPage(page, parsed.data.limit),
     });
@@ -1125,11 +1167,12 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     try {
       const bytes = await readPhotoBytes(env, storageFileId);
       const safeName = fileName.replace(/["\\\r\n]/g, "_");
+      const isDownload = req.query.dl === "1";
       res.set({
         "Content-Type": mimeType,
         "Content-Length": String(bytes.byteLength),
         "Cache-Control": "private, max-age=3600",
-        "Content-Disposition": `${req.query.dl === "1" ? "attachment" : "inline"}; filename="${safeName}"`,
+        "Content-Disposition": `${isDownload ? "attachment" : "inline"}; filename="${safeName}"`,
         // helmet defaults this to `same-origin`, which makes browsers refuse
         // to embed these bytes on the (different-origin) frontend. Serving
         // cross-origin <img>s is this endpoint's whole job — opt out here,
@@ -1137,6 +1180,32 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
         "Cross-Origin-Resource-Policy": "cross-origin",
       });
       res.send(bytes);
+      // Fire-and-forget AFTER serving: thumbnail-variant hits and the photo
+      // they derive from both count as views of the underlying photo — the
+      // variant is a rendering detail, not a separate engagement. Analytics
+      // never delays or fails the bytes.
+      const viewVisitor = parseVisitorId(req.query.v);
+      const viewCorrelation =
+        typeof req.query.c === "string" && req.query.c.length >= 1 && req.query.c.length <= 200
+          ? req.query.c
+          : mintCorrelationId();
+      const viewTraffic = normalizeTrafficSource(
+        req.headers.referer,
+        req.query as Record<string, unknown>
+      );
+      const baseInput = {
+        galleryId: gallery.id,
+        workspaceId: gallery.workspace_id,
+        visitorId: viewVisitor,
+        correlationId: viewCorrelation,
+        trafficSource: viewTraffic,
+      };
+      void publishAnalyticsEvent(
+        env,
+        isDownload
+          ? makePhotoDownloaded({ ...baseInput, photoId: photo.id })
+          : makePhotoViewed({ ...baseInput, photoId: photo.id })
+      );
     } catch (err) {
       console.error("Photo proxy failed:", (err as Error).message);
       res.status(502).json({ error: "Couldn't load this photo" });
@@ -1268,19 +1337,26 @@ export function serializePublicPhoto(
   p: DbPhoto,
   slug: string,
   token: string,
-  derivatives: DbDerivative[] = []
+  derivatives: DbDerivative[] = [],
+  tracking: { visitorId: string | null; correlationId: string } | null = null
 ) {
   const base = `/api/v1/public/galleries/${encodeURIComponent(slug)}/photos/${p.id}`;
   const st = encodeURIComponent(token);
+  // Visitor + correlation ride along as query params (<img> tags cannot set
+  // headers). Both are validated upstream; absent tracking stays absent.
+  const extraParts: string[] = [];
+  if (tracking?.visitorId) extraParts.push(`v=${encodeURIComponent(tracking.visitorId)}`);
+  if (tracking) extraParts.push(`c=${encodeURIComponent(tracking.correlationId)}`);
+  const extra = extraParts.length > 0 ? `&${extraParts.join("&")}` : "";
   const thumb = (variant: string): string | null => {
     const ready = derivatives.some((d) => d.variant === variant && d.status === "READY");
-    return ready ? `${base}?st=${st}&variant=${variant}` : null;
+    return ready ? `${base}?st=${st}${extra}&variant=${variant}` : null;
   };
   return {
     id: p.id,
     filename: p.filename,
-    url: `${base}?st=${st}`,
-    download_url: `${base}?st=${st}&dl=1`,
+    url: `${base}?st=${st}${extra}`,
+    download_url: `${base}?st=${st}${extra}&dl=1`,
     thumbnails: {
       thumb_small: thumb("thumb_small"),
       thumb_large: thumb("thumb_large"),
