@@ -31,6 +31,12 @@ const envSchema = z.object({
   // Optional Redis for BullMQ thumbnail jobs. Unset → the API processes
   // derivatives with the in-process sweep; the worker refuses to boot.
   REDIS_URL: z.string().url("REDIS_URL must be a valid URL").optional(),
+  // Optional Kafka for analytics events (docker compose up kafka).
+  // Unset → emission is a no-op and galleries serve normally.
+  // KAFKA_BROKERS=localhost:9092
+  KAFKA_BROKERS: z.string().min(1).max(500).optional(),
+  // Override the analytics topic (default frameflow.analytics.v1).
+  KAFKA_TOPIC_ANALYTICS: z.string().min(1).max(200).optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
