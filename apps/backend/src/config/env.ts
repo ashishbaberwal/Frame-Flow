@@ -28,6 +28,9 @@ const envSchema = z.object({
   // Optional dedicated secret for signing public gallery access tokens.
   // When unset, one is derived from CLERK_SECRET_KEY (see gallery-tokens.ts).
   GALLERY_TOKEN_SECRET: z.string().min(16).optional(),
+  // Optional Redis for BullMQ thumbnail jobs. Unset → the API processes
+  // derivatives with the in-process sweep; the worker refuses to boot.
+  REDIS_URL: z.string().url("REDIS_URL must be a valid URL").optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "worker:thumbnails": "tsx src/workers/thumbnails.ts",
+    "worker:thumbnails:watch": "tsx watch src/workers/thumbnails.ts",
     "build": "tsc",
     "start": "node dist/server.js",
     "lint": "eslint .",
@@ -14,11 +16,13 @@
   },
   "dependencies": {
     "@clerk/backend": "^3.17.1",
+    "bullmq": "^6.3.12",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "helmet": "^8.1.0",
+    "ioredis": "^6.0.0",
     "multer": "^2.3.0",
     "node-appwrite": "^29.0.0",
     "pg": "^8.16.3",

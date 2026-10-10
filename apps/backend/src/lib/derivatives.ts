@@ -261,6 +261,68 @@ export async function processDerivative(
   }
 }
 
+/**
+ * Claim one row by id for the queue worker: only QUEUED or FAILED-with-
+ * budget rows are claimable. Returns null when another worker won the race
+ * or the row is READY/terminal — the worker treats that as a skip.
+ */
+export async function claimDerivativeById(
+  env: Env,
+  id: string
+): Promise<DbDerivative | null> {
+  const result = await getPool(env).query<DbDerivative>(
+    `UPDATE photo_derivatives
+     SET status = 'PROCESSING', attempts = attempts + 1, updated_at = now()
+     WHERE id = $1 AND (status = 'QUEUED' OR (status = 'FAILED' AND attempts < $2))
+     RETURNING *`,
+    [id, MAX_DERIVATIVE_ATTEMPTS]
+  );
+  return result.rows[0] ?? null;
+}
+
+export type DerivativeJobOutcome = {
+  outcome: "ready" | "failed" | "skipped";
+  photoId: string;
+  variant: string;
+};
+
+/**
+ * One BullMQ job: exactly one (photo, variant). Idempotent — READY rows and
+ * lost races are skips, never duplicate work. Content failures land in FAILED
+ * (visible, retryable via the reconciler or retry endpoint); only unexpected
+ * throws (bugs, PG down mid-job) propagate for BullMQ's own retry/backoff.
+ */
+export async function processDerivativeJob(
+  env: Env,
+  input: { photoId: string; variant: string }
+): Promise<DerivativeJobOutcome> {
+  const done = (outcome: DerivativeJobOutcome["outcome"]): DerivativeJobOutcome => ({
+    outcome,
+    photoId: input.photoId,
+    variant: input.variant,
+  });
+  let row = await getPhotoDerivative(env, input.photoId, input.variant);
+  if (!row) {
+    const ensured = await enqueuePhotoDerivatives(env, input.photoId);
+    row = ensured.find((r) => r.variant === input.variant) ?? null;
+    if (!row) throw new Error("Derivative row could not be ensured");
+  }
+  if (row.status === "READY") return done("skipped");
+  const claimed = await claimDerivativeById(env, row.id);
+  if (!claimed) return done("skipped");
+  const photoRes = await getPool(env).query<DbPhoto>("SELECT * FROM photos WHERE id = $1", [
+    input.photoId,
+  ]);
+  const photo = photoRes.rows[0];
+  if (!photo) {
+    await markDerivativeFailed(env, claimed.id, "Photo no longer exists");
+    return done("failed");
+  }
+  await processDerivative(env, claimed, photo);
+  const check = await getPhotoDerivative(env, input.photoId, input.variant);
+  return done(check?.status === "READY" ? "ready" : "failed");
+}
+
 export type SweepSummary = { claimed: number; ready: number; failed: number; recovered: number };
 
 /** Run recovery + claim/process batches until the queue is drained. */
