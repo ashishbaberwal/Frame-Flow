@@ -28,6 +28,13 @@ export function utcDay(occurredAt: string): string {
 
 export type GalleryViewedEvent = Extract<AnalyticsEvent, { eventType: "GalleryViewed" }>;
 
+export type PhotoEngagementEvent = Extract<
+  AnalyticsEvent,
+  { eventType: "PhotoViewed" | "PhotoDownloaded" }
+>;
+
+export type GallerySharedEvent = Extract<AnalyticsEvent, { eventType: "GalleryShared" }>;
+
 export async function aggregateGalleryViewed(
   client: pg.PoolClient,
   event: GalleryViewedEvent
@@ -87,6 +94,52 @@ export async function aggregateGalleryViewed(
       );
     }
   }
+}
+
+/**
+ * Fold ONE newly stored photo view/download into per-photo counts plus the
+ * gallery's engagement counters. The gallery row is upserted (not assumed):
+ * same-key Kafka ordering normally lands the GalleryViewed first, but the
+ * aggregate must not depend on it. Column names come from a fixed ternary —
+ * never user input.
+ */
+export async function aggregatePhotoEngagement(
+  client: pg.PoolClient,
+  event: PhotoEngagementEvent
+): Promise<void> {
+  const day = utcDay(event.occurredAt);
+  const photoColumn = event.eventType === "PhotoViewed" ? "views" : "downloads";
+  const galleryColumn = event.eventType === "PhotoViewed" ? "photo_views" : "photo_downloads";
+  const galleryInsert = galleryColumn === "photo_views" ? "1, 0" : "0, 1";
+  await client.query(
+    `INSERT INTO photo_daily_stats (photo_id, gallery_id, workspace_id, day, views, downloads)
+     VALUES ($1, $2, $3, $4::date, ${photoColumn === "views" ? "1, 0" : "0, 1"})
+     ON CONFLICT (photo_id, day) DO UPDATE
+     SET ${photoColumn} = photo_daily_stats.${photoColumn} + 1`,
+    [event.photoId, event.galleryId, event.workspaceId, day]
+  );
+  await client.query(
+    `INSERT INTO gallery_daily_stats (gallery_id, workspace_id, day, views, unique_visitors, photo_views, photo_downloads, shares)
+     VALUES ($1, $2, $3::date, 0, 0, ${galleryInsert}, 0)
+     ON CONFLICT (gallery_id, day) DO UPDATE
+     SET ${galleryColumn} = gallery_daily_stats.${galleryColumn} + 1`,
+    [event.galleryId, event.workspaceId, day]
+  );
+}
+
+/** Fold ONE newly stored share click into the gallery's share counter. */
+export async function aggregateGalleryShared(
+  client: pg.PoolClient,
+  event: GallerySharedEvent
+): Promise<void> {
+  const day = utcDay(event.occurredAt);
+  await client.query(
+    `INSERT INTO gallery_daily_stats (gallery_id, workspace_id, day, views, unique_visitors, photo_views, photo_downloads, shares)
+     VALUES ($1, $2, $3::date, 0, 0, 0, 0, 1)
+     ON CONFLICT (gallery_id, day) DO UPDATE
+     SET shares = gallery_daily_stats.shares + 1`,
+    [event.galleryId, event.workspaceId, day]
+  );
 }
 
 // ---------------------------------------------------------------------------

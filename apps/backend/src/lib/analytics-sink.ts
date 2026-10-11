@@ -1,5 +1,9 @@
 import type { Env } from "../config/env.js";
-import { aggregateGalleryViewed } from "./analytics-aggregates.js";
+import {
+  aggregateGalleryShared,
+  aggregateGalleryViewed,
+  aggregatePhotoEngagement,
+} from "./analytics-aggregates.js";
 import { validateAnalyticsEvent, type AnalyticsEvent } from "./analytics-events.js";
 import { getPool } from "./db.js";
 
@@ -37,8 +41,19 @@ export async function processAnalyticsRecord(
   try {
     await client.query("BEGIN");
     const stored = await insertAnalyticsEvent(client, checked.event);
-    if (stored && checked.event.eventType === "GalleryViewed") {
-      await aggregateGalleryViewed(client, checked.event);
+    // Aggregation runs only for newly stored events, in the same transaction:
+    // GalleryDownloaded has no emission surface yet, so it stores raw only.
+    if (stored) {
+      if (checked.event.eventType === "GalleryViewed") {
+        await aggregateGalleryViewed(client, checked.event);
+      } else if (
+        checked.event.eventType === "PhotoViewed" ||
+        checked.event.eventType === "PhotoDownloaded"
+      ) {
+        await aggregatePhotoEngagement(client, checked.event);
+      } else if (checked.event.eventType === "GalleryShared") {
+        await aggregateGalleryShared(client, checked.event);
+      }
     }
     await client.query("COMMIT");
     return stored ? "stored" : "duplicate";
