@@ -43,9 +43,13 @@ services:
     volumes:
       - frameflow-kafka:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "cub cluster describe 2>/dev/null || kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null",
+        ]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 10
 
 volumes:
