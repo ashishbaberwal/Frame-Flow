@@ -368,7 +368,7 @@ function GalleryView({
   const shareSent = React.useRef(false);
   function share() {
     const url = window.location.href;
-    const channel = navigator.share ? "native" : ("clipboard" as const);
+    const channel = typeof navigator.share === "function" ? ("native" as const) : ("clipboard" as const);
     if (navigator.share) {
       navigator.share({ title: meta.name, url }).catch(() => {});
     } else {

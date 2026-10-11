@@ -331,6 +331,33 @@ return zero-filled daily series plus per-source views/uniques, and are
 workspace-scoped: team members get `403`, foreign-workspace galleries
 `404` exactly like missing ones. Customer gallery endpoints are unchanged.
 
+### Engagement definitions (views, downloads, shares, rates)
+
+Every stored event counts exactly once (same `eventId` redelivery is a
+no-op, including under concurrent consumers):
+
+- `photo_views[photo]` / `photo_downloads[photo]` — `PhotoViewed` /
+  `PhotoDownloaded` counts per photo and day. Served inline vs `dl=1`
+  decides the classification server-side; clients cannot mislabel.
+- Gallery `photo_views` / `photo_downloads` / `shares` — windowed sums;
+  `shares` counts `GalleryShared` clicks from the customer Share button
+  (`native` vs `clipboard` channel).
+- `download_rate` — DISTINCT download sessions / DISTINCT sessions over the
+  window, or `null` when there are no sessions. A session is one unlock
+  correlation id, and every session renders the gallery, so every session
+  is eligible — stated denominator, not a "CTR". Computed at read time from
+  the raw log (exact distinct counts, UTC-bounded); counters come from the
+  rollups. No per-photo uniques by design (counts only; uniques stay
+  gallery-level).
+- `top_photos` — top 10 by views (then downloads, then id) with filenames
+  best-effort (`null` after a photo is deleted; counts survive).
+- `GalleryDownloaded` is contracted but dormant: no bulk export exists, so
+  nothing emits it yet. Share clicks send once per gesture with no retry —
+  a failed report is dropped, never repeated, so retries can't inflate.
+- Event volume stays bounded: one event per unlock, photo serve, download,
+  or share click — no scroll/hover tracking, no new visitor data beyond
+  Phase 4's pseudonymous id.
+
 ## Security model
 
 - Clerk is the only identity provider. Supabase Auth and custom JWTs are not

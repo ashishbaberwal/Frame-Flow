@@ -52,7 +52,12 @@ vi.mock("../src/lib/storage.js", async (importOriginal) => {
 import { createApp } from "../src/server.js";
 import { resetEnvCache } from "../src/config/env.js";
 import { closePool, getPool } from "../src/lib/db.js";
-import { makeGalleryViewed } from "../src/lib/analytics-events.js";
+import {
+  makeGalleryShared,
+  makeGalleryViewed,
+  makePhotoDownloaded,
+  makePhotoViewed,
+} from "../src/lib/analytics-events.js";
 import { processAnalyticsRecord } from "../src/lib/analytics-sink.js";
 import type { Env } from "../src/config/env.js";
 
@@ -334,6 +339,120 @@ describeIf(hasDb)("Analytics API", () => {
       { day: DAY_2, views: 0, unique_visitors: 0 },
     ]);
     expect(res.body.sources).toEqual([]);
+    expect(res.body.engagement).toEqual({
+      photo_views: 0,
+      photo_downloads: 0,
+      shares: 0,
+      download_rate: null,
+    });
+    expect(res.body.top_photos).toEqual([]);
+  });
+
+  it("engagement summary, download rate, and top photos", async () => {
+    const second = await request(app)
+      .post(`/api/v1/events/${eventId}/photos`)
+      .set(adminA)
+      .attach("photos", pngUpload(), { filename: "aa2.png", contentType: "image/png" });
+    expect(second.status).toBe(201);
+    const photos = (
+      await getPool(env).query<{ id: string; filename: string }>(
+        "SELECT id, filename FROM photos WHERE event_id = $1 ORDER BY filename ASC",
+        [eventId]
+      )
+    ).rows;
+    expect(photos.length).toBe(2);
+    const [first, other] = [photos[0]!.id, photos[1]!.id];
+
+    const view = (photoId: string, correlation: string) =>
+      processAnalyticsRecord(
+        env,
+        makePhotoViewed({
+          galleryId,
+          workspaceId,
+          visitorId: null,
+          correlationId: correlation,
+          trafficSource: { source: "direct", medium: null, campaign: null },
+          photoId,
+        })
+      );
+    // Session A views first twice and downloads it; session B views other.
+    expect(await view(first, "corr-rate-A")).toBe("stored");
+    expect(await view(first, "corr-rate-A")).toBe("stored");
+    expect(
+      await processAnalyticsRecord(
+        env,
+        makePhotoDownloaded({
+          galleryId,
+          workspaceId,
+          visitorId: null,
+          correlationId: "corr-rate-A",
+          trafficSource: { source: "direct", medium: null, campaign: null },
+          photoId: first,
+        })
+      )
+    ).toBe("stored");
+    expect(await view(other, "corr-rate-B")).toBe("stored");
+    expect(
+      await processAnalyticsRecord(
+        env,
+        makeGalleryShared({
+          galleryId,
+          workspaceId,
+          visitorId: null,
+          correlationId: "corr-rate-A",
+          trafficSource: { source: "direct", medium: null, campaign: null },
+          channel: "clipboard",
+        })
+      )
+    ).toBe("stored");
+
+    const res = await request(app)
+      .get(`/api/v1/analytics/galleries/${galleryId}`)
+      .set(adminA);
+    expect(res.status).toBe(200);
+    // occurredAt is today: the default trailing-30d window contains it.
+    expect(res.body.engagement).toEqual({
+      photo_views: 3,
+      photo_downloads: 1,
+      shares: 1,
+      download_rate: 0.5,
+    });
+    expect(res.body.top_photos).toEqual([
+      { id: first, filename: "aa.png", views: 2, downloads: 1 },
+      { id: other, filename: "aa2.png", views: 1, downloads: 0 },
+    ]);
+
+    // Deleted photos keep counts with a null filename.
+    await request(app).delete(`/api/v1/photos/${first}`).set(adminA);
+    const afterDelete = await request(app)
+      .get(`/api/v1/analytics/galleries/${galleryId}`)
+      .set(adminA);
+    expect(afterDelete.body.top_photos[0]).toMatchObject({ id: first, filename: null });
+  });
+
+  it("overview carries engagement without leaking foreign workspaces", async () => {
+    await processAnalyticsRecord(
+      env,
+      makePhotoDownloaded({
+        galleryId,
+        workspaceId,
+        visitorId: null,
+        correlationId: "corr-ov-A",
+        trafficSource: { source: "direct", medium: null, campaign: null },
+        photoId: "00000000-0000-4000-8000-000000000000",
+      })
+    );
+    const res = await request(app).get("/api/v1/analytics/overview").set(adminA);
+    expect(res.status).toBe(200);
+    expect(res.body.totals).toMatchObject({
+      photo_views: 0,
+      photo_downloads: 1,
+      shares: 0,
+      download_rate: 1,
+    });
+    expect(res.body.galleries).toEqual([
+      expect.objectContaining({ id: galleryId, photo_downloads: 1, download_rate: 1 }),
+    ]);
   });
 });
 

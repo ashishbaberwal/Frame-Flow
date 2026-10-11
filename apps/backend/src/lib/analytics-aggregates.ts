@@ -158,11 +158,52 @@ export type GalleryAnalytics = {
   totals: { views: number; unique_visitors: number };
   by_day: DayBucket[];
   sources: SourceBucket[];
+  engagement: EngagementSummary;
+  top_photos: TopPhoto[];
+};
+
+export type EngagementSummary = {
+  photo_views: number;
+  photo_downloads: number;
+  shares: number;
+  /**
+   * DISTINCT download sessions / DISTINCT sessions over the window, or null
+   * when there are no sessions yet. A session is one unlock correlation id —
+   * every session renders the gallery, so every session is eligible. This is
+   * a download rate with a stated denominator, not a "CTR".
+   */
+  download_rate: number | null;
+};
+
+export type TopPhoto = {
+  id: string;
+  /** Null once the photo row is deleted; counts survive in the rollup. */
+  filename: string | null;
+  views: number;
+  downloads: number;
 };
 
 export type WorkspaceAnalytics = {
-  totals: { views: number; unique_visitors: number; galleries: number };
-  galleries: { id: string; name: string | null; slug: string | null; views: number; unique_visitors: number }[];
+  totals: {
+    views: number;
+    unique_visitors: number;
+    galleries: number;
+    photo_views: number;
+    photo_downloads: number;
+    shares: number;
+    download_rate: number | null;
+  };
+  galleries: {
+    id: string;
+    name: string | null;
+    slug: string | null;
+    views: number;
+    unique_visitors: number;
+    photo_views: number;
+    photo_downloads: number;
+    shares: number;
+    download_rate: number | null;
+  }[];
   sources: SourceBucket[];
 };
 
@@ -216,7 +257,77 @@ export async function getGalleryAnalytics(
     totals: totals.rows[0] ?? { views: 0, unique_visitors: 0 },
     by_day: byDay.rows,
     sources,
+    engagement: await getGalleryEngagement(env, galleryId, range),
+    top_photos: await getTopPhotos(env, galleryId, range),
   };
+}
+
+/**
+ * Engagement summary + top photos for one gallery. The rate comes from the
+ * raw log's correlation sessions (exact distinct counts over the window);
+ * counters come from the rollups. Bounds are explicit UTC instants so the
+ * server time zone can never shift the window.
+ */
+export async function getGalleryEngagement(
+  env: Env,
+  galleryId: string,
+  range: AnalyticsRange
+): Promise<EngagementSummary> {
+  const pool = getPool(env);
+  const counters = await pool.query<{
+    photo_views: number;
+    photo_downloads: number;
+    shares: number;
+  }>(
+    `SELECT COALESCE(SUM(photo_views), 0)::int AS photo_views,
+            COALESCE(SUM(photo_downloads), 0)::int AS photo_downloads,
+            COALESCE(SUM(shares), 0)::int AS shares
+     FROM gallery_daily_stats
+     WHERE gallery_id = $1 AND day BETWEEN $2::date AND $3::date`,
+    [galleryId, range.from, range.to]
+  );
+  const sessions = await pool.query<{ sessions: number; with_download: number }>(
+    `SELECT COUNT(DISTINCT correlation_id)::int AS sessions,
+            COUNT(DISTINCT CASE WHEN event_type = 'PhotoDownloaded'
+              THEN correlation_id END)::int AS with_download
+     FROM analytics_event_log
+     WHERE gallery_id = $1
+       AND occurred_at >= ($2 || 'T00:00:00Z')::timestamptz
+       AND occurred_at < (($3 || 'T00:00:00Z')::timestamptz + interval '1 day')`,
+    [galleryId, range.from, range.to]
+  );
+  const { sessions: total, with_download: converted } = sessions.rows[0] ?? {
+    sessions: 0,
+    with_download: 0,
+  };
+  return {
+    photo_views: counters.rows[0]?.photo_views ?? 0,
+    photo_downloads: counters.rows[0]?.photo_downloads ?? 0,
+    shares: counters.rows[0]?.shares ?? 0,
+    download_rate: total > 0 ? converted / total : null,
+  };
+}
+
+/** Top 10 photos by views over the window (filenames best-effort). */
+export async function getTopPhotos(
+  env: Env,
+  galleryId: string,
+  range: AnalyticsRange
+): Promise<TopPhoto[]> {
+  const rows = await getPool(env).query<TopPhoto>(
+    `SELECT p.photo_id::text AS id,
+            MAX(ph.filename) AS filename,
+            SUM(p.views)::int AS views,
+            SUM(p.downloads)::int AS downloads
+     FROM photo_daily_stats p
+     LEFT JOIN photos ph ON ph.id = p.photo_id
+     WHERE p.gallery_id = $1 AND p.day BETWEEN $2::date AND $3::date
+     GROUP BY p.photo_id
+     ORDER BY views DESC, downloads DESC, id ASC
+     LIMIT 10`,
+    [galleryId, range.from, range.to]
+  );
+  return rows.rows;
 }
 
 /** Workspace overview: totals, per-gallery breakdown, top sources. */
@@ -226,12 +337,22 @@ export async function getWorkspaceAnalytics(
   range: AnalyticsRange
 ): Promise<WorkspaceAnalytics> {
   const pool = getPool(env);
-  const totals = await pool.query<{ views: number; unique_visitors: number; galleries: number }>(
+  const totals = await pool.query<{
+    views: number;
+    unique_visitors: number;
+    galleries: number;
+    photo_views: number;
+    photo_downloads: number;
+    shares: number;
+  }>(
     `SELECT COALESCE(SUM(s.views), 0)::int AS views,
             (SELECT COUNT(DISTINCT v.visitor_hash)::int FROM gallery_visitor_days v
              WHERE v.workspace_id = $1 AND v.day BETWEEN $2::date AND $3::date) AS unique_visitors,
             (SELECT COUNT(DISTINCT s2.gallery_id)::int FROM gallery_daily_stats s2
-             WHERE s2.workspace_id = $1 AND s2.day BETWEEN $2::date AND $3::date) AS galleries
+             WHERE s2.workspace_id = $1 AND s2.day BETWEEN $2::date AND $3::date) AS galleries,
+            COALESCE(SUM(s.photo_views), 0)::int AS photo_views,
+            COALESCE(SUM(s.photo_downloads), 0)::int AS photo_downloads,
+            COALESCE(SUM(s.shares), 0)::int AS shares
      FROM gallery_daily_stats s
      WHERE s.workspace_id = $1 AND s.day BETWEEN $2::date AND $3::date`,
     [workspaceId, range.from, range.to]
@@ -240,17 +361,55 @@ export async function getWorkspaceAnalytics(
     id: string;
     views: number;
     unique_visitors: number;
+    photo_views: number;
+    photo_downloads: number;
+    shares: number;
   }>(
     `SELECT s.gallery_id AS id,
             SUM(s.views)::int AS views,
             (SELECT COUNT(DISTINCT v.visitor_hash)::int FROM gallery_visitor_days v
-             WHERE v.gallery_id = s.gallery_id AND v.day BETWEEN $2::date AND $3::date) AS unique_visitors
+             WHERE v.gallery_id = s.gallery_id AND v.day BETWEEN $2::date AND $3::date) AS unique_visitors,
+            SUM(s.photo_views)::int AS photo_views,
+            SUM(s.photo_downloads)::int AS photo_downloads,
+            SUM(s.shares)::int AS shares
      FROM gallery_daily_stats s
      WHERE s.workspace_id = $1 AND s.day BETWEEN $2::date AND $3::date
      GROUP BY s.gallery_id
      ORDER BY views DESC, id ASC`,
     [workspaceId, range.from, range.to]
   );
+  // Session rates per gallery plus the workspace rollup, each from one
+  // grouped raw-log query — never per-gallery fan-out.
+  const sessionRates = await pool.query<{ gallery_id: string; sessions: number; with_download: number }>(
+    `SELECT gallery_id::text AS gallery_id,
+            COUNT(DISTINCT correlation_id)::int AS sessions,
+            COUNT(DISTINCT CASE WHEN event_type = 'PhotoDownloaded'
+              THEN correlation_id END)::int AS with_download
+     FROM analytics_event_log
+     WHERE workspace_id = $1
+       AND occurred_at >= ($2 || 'T00:00:00Z')::timestamptz
+       AND occurred_at < (($3 || 'T00:00:00Z')::timestamptz + interval '1 day')
+     GROUP BY gallery_id`,
+    [workspaceId, range.from, range.to]
+  );
+  const rateByGallery = new Map(
+    sessionRates.rows.map((r) => [
+      r.gallery_id,
+      r.sessions > 0 ? r.with_download / r.sessions : null,
+    ])
+  );
+  const rate = (sessions: number, withDownload: number): number | null =>
+    sessions > 0 ? withDownload / sessions : null;
+  const totalsRow = totals.rows[0] ?? {
+    views: 0,
+    unique_visitors: 0,
+    galleries: 0,
+    photo_views: 0,
+    photo_downloads: 0,
+    shares: 0,
+  };
+  const wsSessions = sessionRates.rows.reduce((acc, r) => acc + r.sessions, 0);
+  const wsConverted = sessionRates.rows.reduce((acc, r) => acc + r.with_download, 0);
   // Names/slugs are display-only and best-effort (deleted galleries keep
   // history but lose metadata) — one lookup, never a join that drops rows.
   const meta =
@@ -277,13 +436,17 @@ export async function getWorkspaceAnalytics(
   );
   const uniquesBySource = new Map(sourceUniques.rows.map((r) => [r.source, r.unique_visitors]));
   return {
-    totals: totals.rows[0] ?? { views: 0, unique_visitors: 0, galleries: 0 },
+    totals: { ...totalsRow, download_rate: rate(wsSessions, wsConverted) },
     galleries: galleries.rows.map((g) => ({
       id: g.id,
       name: metaById.get(g.id)?.name ?? null,
       slug: metaById.get(g.id)?.slug ?? null,
       views: g.views,
       unique_visitors: g.unique_visitors,
+      photo_views: g.photo_views,
+      photo_downloads: g.photo_downloads,
+      shares: g.shares,
+      download_rate: rateByGallery.get(g.id) ?? null,
     })),
     sources: sourceViews.rows
       .map((r) => ({
