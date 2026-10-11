@@ -157,6 +157,12 @@ export function summarizeProcessingStatus(rows: DbDerivative[]): PhotoProcessing
  * pool) can never claim the same row.
  */
 async function claimDueDerivatives(env: Env, limit: number): Promise<DbDerivative[]> {
+  // The status predicate lives on the OUTER update, not just the subquery:
+  // when two sweeps race, the loser blocks on the winner's row lock, then
+  // re-evaluates the outer predicate against the committed row — already
+  // PROCESSING no longer qualifies, so it claims nothing. A bare
+  // WHERE id IN (SELECT ... QUEUED) would re-claim on recheck and process
+  // every row twice.
   const result = await getPool(env).query<DbDerivative>(
     `UPDATE photo_derivatives d SET status = 'PROCESSING', attempts = d.attempts + 1, updated_at = now()
      WHERE d.id IN (
@@ -165,6 +171,7 @@ async function claimDueDerivatives(env: Env, limit: number): Promise<DbDerivativ
        ORDER BY created_at ASC
        LIMIT $2
      )
+     AND (d.status = 'QUEUED' OR (d.status = 'FAILED' AND d.attempts < $1))
      RETURNING *`,
     [MAX_DERIVATIVE_ATTEMPTS, limit]
   );
@@ -210,6 +217,17 @@ async function markDerivativeFailed(env: Env, id: string, error: string): Promis
 }
 
 /**
+ * Storage-safe derivative filename: Appwrite validates the extension against
+ * the bucket allowlist, so `photo.png (thumb_small)` (extension
+ * "png (thumb_small)") is rejected. Strip to `<base>-<variant>.webp`.
+ */
+export function derivativeFilename(filename: string, variant: string): string {
+  const dot = filename.lastIndexOf(".");
+  const stem = (dot > 0 ? filename.slice(0, dot) : filename).replace(/[/\\]/g, "_").slice(0, 100);
+  return `${stem || "photo"}-${variant}.webp`;
+}
+
+/**
  * Transform one claimed derivative: sniff the real format (never trust the
  * upload MIME), enforce dimension/pixel guards, resize without enlarging,
  * encode WebP, store as a new Appwrite object, mark READY. Any throw marks
@@ -248,7 +266,7 @@ export async function processDerivative(
       env,
       out.data,
       "image/webp",
-      `${photo.filename} (${derivative.variant})`
+      derivativeFilename(photo.filename, derivative.variant)
     );
     await markDerivativeReady(env, derivative.id, {
       storageFileId: stored.storageFileId,

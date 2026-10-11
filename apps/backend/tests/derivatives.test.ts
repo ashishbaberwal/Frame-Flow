@@ -52,7 +52,8 @@ vi.mock("../src/lib/storage.js", async (importOriginal) => {
     uploadPhoto: vi.fn(async (_env: unknown, buffer: Buffer, mime: string, name: string) => {
       counter += 1;
       const id = `aw_dv_${counter}_${Date.now()}`;
-      if (name.includes("(thumb_")) derivatives.set(id, buffer);
+      // Derivative binaries are named <base>-thumb_<size>.webp by the pipeline.
+      if (/-thumb_(small|large)\.webp$/.test(name)) derivatives.set(id, buffer);
       else originals.set(id, buffer);
       return { storageFileId: id, size: buffer.byteLength };
     }),
@@ -76,6 +77,7 @@ import { createApp } from "../src/server.js";
 import { resetEnvCache } from "../src/config/env.js";
 import { closePool, getPool } from "../src/lib/db.js";
 import {
+  derivativeFilename,
   getPhotoDerivatives,
   recoverStuckDerivatives,
   sweepDerivativeQueue,
@@ -113,8 +115,19 @@ function pngUpload(): Buffer {
   return Buffer.concat([header, Buffer.alloc(60)]);
 }
 
-describeIf(hasDb)("Photo derivatives", () => {
-  let app: ReturnType<typeof createApp>;
+describe("derivativeFilename", () => {
+  // Appwrite validates the extension against the bucket allowlist, so
+  // derivative names must always end in a real image extension.
+  it("keeps a storage-safe .webp name per variant", () => {
+    expect(derivativeFilename("shot.png", "thumb_small")).toBe("shot-thumb_small.webp");
+    expect(derivativeFilename("wedding.JPEG", "thumb_large")).toBe("wedding-thumb_large.webp");
+    expect(derivativeFilename("noext", "thumb_small")).toBe("noext-thumb_small.webp");
+    expect(derivativeFilename("", "thumb_small")).toBe("photo-thumb_small.webp");
+    expect(derivativeFilename("../../evil.png", "thumb_small")).toBe(".._.._evil-thumb_small.webp");
+  });
+});
+
+describeIf(hasDb)("Photo derivatives", () => {  let app: ReturnType<typeof createApp>;
   let env: Env;
   let eventId: string;
 
@@ -209,7 +222,21 @@ describeIf(hasDb)("Photo derivatives", () => {
     await settle(photo.id);
     const rows = await getPhotoDerivatives(env, photo.id);
     expect(rows.map((r) => r.status)).toEqual(["READY", "READY"]);
-    expect(rows.every((r) => r.attempts >= 1)).toBe(true);
+    // Exactly-once under concurrent sweeps (background kick + settle race):
+    // the claim serializes workers, so neither row is processed twice.
+    expect(rows.map((r) => r.attempts)).toEqual([1, 1]);
+
+    // Derivative binaries upload as image/webp under extension-safe names
+    // (Appwrite rejects names without an allowlisted extension).
+    const { uploadPhoto } = await import("../src/lib/storage.js");
+    const derivativeUploads = vi
+      .mocked(uploadPhoto)
+      .mock.calls.filter((c) => String(c[3]).includes("thumb_"));
+    expect(derivativeUploads.length).toBe(2);
+    for (const call of derivativeUploads) {
+      expect(call[2]).toBe("image/webp");
+      expect(call[3]).toMatch(/-thumb_(small|large)\.webp$/);
+    }
 
     const list = await request(app).get(`/api/v1/events/${eventId}/photos`).set(adminA);
     const listed = (list.body.photos as { id: string; processing_status: string }[]).find(
@@ -246,6 +273,21 @@ describeIf(hasDb)("Photo derivatives", () => {
     await settle(photoId);
     rows = await getPhotoDerivatives(env, photoId);
     expect(rows.map((r) => r.status)).toEqual(["READY", "READY"]);
+  });
+
+  it("concurrent sweeps never double-process a row", async () => {
+    const photoId = await uploadOne();
+    // The upload's background kick plus three explicit sweeps all race for
+    // the same QUEUED rows; the claim must serialize them to exactly-once.
+    await Promise.all([
+      sweepDerivativeQueue(env),
+      sweepDerivativeQueue(env),
+      sweepDerivativeQueue(env),
+    ]);
+    await settle(photoId);
+    const rows = await getPhotoDerivatives(env, photoId);
+    expect(rows.map((r) => r.status)).toEqual(["READY", "READY"]);
+    expect(rows.map((r) => r.attempts)).toEqual([1, 1]);
   });
 
   it("duplicate enqueue never creates duplicate rows", async () => {
