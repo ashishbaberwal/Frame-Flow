@@ -52,7 +52,12 @@ type GalleryMeta = {
 type Gate =
   | { state: "loading" }
   | { state: "pin"; meta: GalleryMeta }
-  | { state: "viewing"; meta: GalleryMeta; photos: Photo[] }
+  | {
+      state: "viewing";
+      meta: GalleryMeta;
+      photos: Photo[];
+      session: { accessToken: string; visitorId: string | null; correlationId: string };
+    }
   | { state: "not-found" }
   | { state: "unavailable" }
   | { state: "empty"; meta: GalleryMeta };
@@ -158,7 +163,16 @@ export default function CustomerGalleryPage() {
       if (all.length === 0) {
         setGate({ state: "empty", meta: toMeta(res.gallery) });
       } else {
-        setGate({ state: "viewing", meta: toMeta(res.gallery), photos: all.map(toPublicPhoto) });
+        setGate({
+          state: "viewing",
+          meta: toMeta(res.gallery),
+          photos: all.map(toPublicPhoto),
+          session: {
+            accessToken: res.access_token,
+            visitorId: session.visitorId,
+            correlationId: session.correlationId,
+          },
+        });
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
@@ -210,6 +224,7 @@ export default function CustomerGalleryPage() {
         <GalleryView
           meta={gate.meta}
           photos={gate.photos}
+          session={gate.session}
           lightboxIndex={lightboxIndex}
           setLightboxIndex={setLightboxIndex}
         />
@@ -338,16 +353,22 @@ function Stat({ label, value }: { label: string; value: string }) {
 function GalleryView({
   meta,
   photos,
+  session,
   lightboxIndex,
   setLightboxIndex,
 }: {
   meta: GalleryMeta;
   photos: Photo[];
+  session: { accessToken: string; visitorId: string | null; correlationId: string };
   lightboxIndex: number | null;
   setLightboxIndex: (i: number | null) => void;
 }) {
+  // One in-flight share report at a time and never a retry: every stored
+  // event counts, so a failed report is dropped, not repeated.
+  const shareSent = React.useRef(false);
   function share() {
     const url = window.location.href;
+    const channel = navigator.share ? "native" : ("clipboard" as const);
     if (navigator.share) {
       navigator.share({ title: meta.name, url }).catch(() => {});
     } else {
@@ -355,6 +376,16 @@ function GalleryView({
         () => toast.success("Link copied"),
         () => toast.error("Couldn't copy link")
       );
+    }
+    if (!shareSent.current) {
+      shareSent.current = true;
+      void api
+        .recordShareClick(meta.slug, session.accessToken, {
+          channel,
+          visitorId: session.visitorId,
+          correlationId: session.correlationId,
+        })
+        .catch(() => undefined);
     }
   }
 
