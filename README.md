@@ -300,6 +300,37 @@ cd apps/backend && bun run worker:analytics:watch   # consumer (separate termina
   worker service. Vercel/Render provide no Kafka — this is external
   infrastructure with its own cost.
 
+### Analytics definitions (views, uniques, sources)
+
+One **view** = one successful gallery unlock (one `GalleryViewed` event).
+Re-entering the PIN counts as a new view; redelivery of the *same* event
+(same `eventId`) never counts twice — the raw log's primary key plus
+conditional aggregation enforce that. Initial page loads that 404, failed
+PINs, and rate-limited attempts are not views.
+
+**Unique visitors** are visitor-day estimates, not person counts: the
+frontend sends a pseudonymous client-minted UUID (`localStorage`, reset by
+clearing site data), stored as a SHA-256 hash in one row per
+(gallery, UTC day, hash). Cookie deletion, multiple devices, shared links,
+and missing ids (counted as views, never as uniques) all skew the number.
+Range uniques are exact distinct-hash counts over the window — never summed
+daily uniques.
+
+**Traffic sources** are `direct` (no referrer), `unknown` (unparseable), or
+a normalized hostname (`www.` stripped, length-capped, path/query dropped)
+with optional UTM medium/campaign passthrough. Referrers are untrusted
+input. All buckets are UTC days from the event's `occurredAt`.
+
+```text
+GET /api/v1/analytics/overview?from=YYYY-MM-DD&to=YYYY-MM-DD          (admin)
+GET /api/v1/analytics/galleries/:galleryId?from=YYYY-MM-DD&to=YYYY-MM-DD  (admin)
+```
+
+Both default to the trailing 30 days (max one year, `400` otherwise),
+return zero-filled daily series plus per-source views/uniques, and are
+workspace-scoped: team members get `403`, foreign-workspace galleries
+`404` exactly like missing ones. Customer gallery endpoints are unchanged.
+
 ## Security model
 
 - Clerk is the only identity provider. Supabase Auth and custom JWTs are not
