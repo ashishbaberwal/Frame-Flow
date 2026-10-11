@@ -66,6 +66,10 @@ import {
   summarizeProcessingStatus,
   type DbDerivative,
 } from "../lib/derivatives.js";
+import {
+  getGalleryAnalytics,
+  getWorkspaceAnalytics,
+} from "../lib/analytics-aggregates.js";
 import { getDerivativeQueue } from "../lib/queue.js";
 import { publishDerivativeJobs } from "../lib/derivative-jobs.js";
 import {
@@ -162,6 +166,44 @@ function serializePhotoPage(page: { nextCursor: string | null; hasMore: boolean 
     next_cursor: page.nextCursor,
     has_more: page.hasMore,
   };
+}
+
+/**
+ * Parse ?from=&to= (YYYY-MM-DD UTC days) for analytics reads. Defaults to
+ * the trailing 30 days ending today; rejects malformed dates, inverted
+ * ranges, and windows over a year (unbounded scans help nobody).
+ */
+function parseAnalyticsRange(query: unknown):
+  | { ok: true; range: { from: string; to: string } }
+  | { ok: false; error: string } {
+  const parsed = z
+    .object({
+      from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    })
+    .safeParse(query);
+  if (!parsed.success) {
+    return { ok: false, error: "Invalid date range (use YYYY-MM-DD)" };
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const to = parsed.data.to ?? today;
+  const from =
+    parsed.data.from ??
+    new Date(Date.parse(`${to}T00:00:00Z`) - 29 * 86_400_000).toISOString().slice(0, 10);
+  const valid = (s: string): boolean => {
+    const d = new Date(`${s}T00:00:00Z`);
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+  };
+  if (!valid(from) || !valid(to)) {
+    return { ok: false, error: "Invalid date range (use YYYY-MM-DD)" };
+  }
+  if (from > to) {
+    return { ok: false, error: "Invalid date range (?from= must not be after ?to=)" };
+  }
+  if (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`) > 366 * 86_400_000) {
+    return { ok: false, error: "Invalid date range (max one year)" };
+  }
+  return { ok: true, range: { from, to } };
 }
 
 /**
@@ -263,6 +305,59 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     } catch {
       res.status(503).json({ error: "Queue unavailable" });
     }
+  }) as unknown as import("express").RequestHandler);
+
+  /**
+   * Workspace gallery analytics (ADMIN only, workspace-scoped).
+   * Totals and per-gallery breakdown over an explicit UTC-day window.
+   * Range uniques are exact distinct-visitor counts, never summed daily
+   * uniques. Customer gallery endpoints are untouched.
+   */
+  router.get("/analytics/overview", requireRole(env, "ADMIN"), (async (
+    req: Request,
+    res: Response
+  ) => {
+    const rangeParsed = parseAnalyticsRange(req.query);
+    if (!rangeParsed.ok) {
+      res.status(400).json({ error: rangeParsed.error });
+      return;
+    }
+    const user = await resolveAppUser(env, req);
+    const data = await getWorkspaceAnalytics(env, user.workspace_id, rangeParsed.range);
+    res.json({ range: rangeParsed.range, ...data });
+  }) as unknown as import("express").RequestHandler);
+
+  /**
+   * One gallery's analytics (ADMIN only). The gallery must belong to the
+   * admin's workspace through its event — otherwise 404, never a leak.
+   * Days with no views are zero-filled so charts render continuously.
+   */
+  router.get("/analytics/galleries/:galleryId", requireRole(env, "ADMIN"), (async (
+    req: Request,
+    res: Response
+  ) => {
+    const rangeParsed = parseAnalyticsRange(req.query);
+    if (!rangeParsed.ok) {
+      res.status(400).json({ error: rangeParsed.error });
+      return;
+    }
+    const actor = await resolveAppUser(env, req);
+    const gallery = await getGalleryById(env, String(req.params.galleryId));
+    if (!gallery) {
+      res.status(404).json({ error: "Gallery not found" });
+      return;
+    }
+    const event = await getWorkspaceEvent(env, gallery.event_id, actor.workspace_id);
+    if (!event) {
+      res.status(404).json({ error: "Gallery not found" });
+      return;
+    }
+    const data = await getGalleryAnalytics(env, gallery.id, rangeParsed.range);
+    res.json({
+      gallery: { id: gallery.id, name: gallery.name, slug: gallery.slug },
+      range: rangeParsed.range,
+      ...data,
+    });
   }) as unknown as import("express").RequestHandler);
 
   /**
