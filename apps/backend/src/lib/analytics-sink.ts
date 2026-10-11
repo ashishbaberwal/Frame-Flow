@@ -50,19 +50,6 @@ export async function processAnalyticsRecord(
   }
 }
 
-/** Insert a validated event. ON CONFLICT DO NOTHING is the dedupe point. */
-export async function storeAnalyticsEvent(
-  env: Env,
-  event: AnalyticsEvent
-): Promise<"stored" | "duplicate"> {
-  const client = await getPool(env).connect();
-  try {
-    return (await insertAnalyticsEvent(client, event)) ? "stored" : "duplicate";
-  } finally {
-    client.release();
-  }
-}
-
 async function insertAnalyticsEvent(
   client: import("pg").PoolClient,
   event: AnalyticsEvent

@@ -5,15 +5,15 @@ import { getPool, type DbPhoto } from "./db.js";
 import { readPhotoBytes, uploadPhoto } from "./storage.js";
 
 // ---------------------------------------------------------------------------
-// Image derivatives (Phase 2).
+// Image derivatives (Phase 2, queue-backed since Phase 3).
 //
 // Originals are never modified: each variant is a new Appwrite object whose
 // identity is the (photo_id, variant) pair. Status lives in PostgreSQL
 // (photo_derivatives) — the single source of truth for "is this thumbnail
-// ready". Routes only ever enqueue (INSERT) and trigger; all expensive work
-// happens in sweepDerivativeQueue, which runs off the response path.
-// Phase 3 replaces kickDerivativeWorker's body with a BullMQ publish — the
-// enqueue + sweep seam stays the same.
+// ready". Routes enqueue (INSERT) and dispatch: publish-first to BullMQ when
+// Redis is configured, in-process sweep otherwise. The sweep below is both
+// the no-Redis fallback and the crash-recovery path; the worker reuses
+// claimDerivativeById + processDerivative for the same unit of work.
 // ---------------------------------------------------------------------------
 
 export const DERIVATIVE_VARIANTS = [
