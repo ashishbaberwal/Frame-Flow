@@ -280,6 +280,71 @@ describeIf(hasDb)("Analytics route emission", () => {
     expect(list.status).toBe(200);
     expect((list.body.photos[0].url as string)).toContain(`c=${unlock.body.correlation_id}`);
   });
+
+  it("share click emits a stitched GalleryShared", async () => {
+    const unlock = await request(app)
+      .post(`/api/v1/public/galleries/${slug}/unlock`)
+      .set("x-visitor-id", VISITOR)
+      .send({ pin });
+    const token = unlock.body.access_token as string;
+    const correlation = unlock.body.correlation_id as string;
+    clearCaptured();
+
+    const res = await request(app)
+      .post(`/api/v1/public/galleries/${slug}/share?st=${encodeURIComponent(token)}&c=${correlation}`)
+      .set("x-visitor-id", VISITOR)
+      .send({ channel: "clipboard" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+
+    await flush();
+    expect(captured().length).toBe(1);
+    const event = captured()[0]!;
+    expect(event.eventType).toBe("GalleryShared");
+    expect(event.channel).toBe("clipboard");
+    expect(event.visitorId).toBe(VISITOR.toLowerCase());
+    expect(event.correlationId).toBe(correlation);
+    const json = JSON.stringify(event);
+    expect(json).not.toContain(pin);
+    expect(json).not.toContain("st=");
+  });
+
+  it("share rejects bad channel, bad token, and missing galleries", async () => {
+    const unlock = await request(app)
+      .post(`/api/v1/public/galleries/${slug}/unlock`)
+      .send({ pin });
+    const token = unlock.body.access_token as string;
+
+    const badChannel = await request(app)
+      .post(`/api/v1/public/galleries/${slug}/share?st=${encodeURIComponent(token)}`)
+      .send({ channel: "email" });
+    expect(badChannel.status).toBe(400);
+
+    const badToken = await request(app)
+      .post(`/api/v1/public/galleries/${slug}/share?st=tampered`)
+      .send({ channel: "native" });
+    expect(badToken.status).toBe(403);
+
+    // Deleted event cascades the gallery: the token outlives nothing.
+    await request(app).delete(`/api/v1/events/${eventId}`).set(adminA);
+    const gone = await request(app)
+      .post(`/api/v1/public/galleries/${slug}/share?st=${encodeURIComponent(token)}`)
+      .send({ channel: "native" });
+    expect(gone.status).toBe(404);
+  });
+
+  it("share outage keeps the action working", async () => {
+    (globalThis as Record<string, unknown>).__analyticsFail = true;
+    const unlock = await request(app)
+      .post(`/api/v1/public/galleries/${slug}/unlock`)
+      .send({ pin });
+    const res = await request(app)
+      .post(
+        `/api/v1/public/galleries/${slug}/share?st=${encodeURIComponent(unlock.body.access_token)}`
+      )
+      .send({ channel: "native" });
+    expect(res.status).toBe(200);
+  });
 });
 
 async function seed(env: Env) {

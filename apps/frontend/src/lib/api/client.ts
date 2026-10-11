@@ -265,6 +265,20 @@ export const api = {
       { headers }
     );
   },
+  recordShareClick: (
+    slug: string,
+    accessToken: string,
+    input: { channel: "native" | "clipboard"; visitorId?: string | null; correlationId?: string }
+  ) => {
+    const search = new URLSearchParams({ st: accessToken });
+    if (input.correlationId) search.set("c", input.correlationId);
+    const headers: Record<string, string> = {};
+    if (input.visitorId) headers["x-visitor-id"] = input.visitorId;
+    return apiFetch<{ ok: boolean }>(
+      `/public/galleries/${encodeURIComponent(slug)}/share?${search.toString()}`,
+      { method: "POST", body: { channel: input.channel }, headers }
+    );
+  },
 };
 
 /**

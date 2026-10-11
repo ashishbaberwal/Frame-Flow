@@ -73,6 +73,7 @@ import {
 import { getDerivativeQueue } from "../lib/queue.js";
 import { publishDerivativeJobs } from "../lib/derivative-jobs.js";
 import {
+  makeGalleryShared,
   makeGalleryViewed,
   makePhotoDownloaded,
   makePhotoViewed,
@@ -158,6 +159,12 @@ const publicPhotoPageQuerySchema = z.object({
     )
     .transform((v) => (v === undefined ? PHOTO_PAGE_DEFAULT_LIMIT : Number(v))),
   cursor: z.string().min(1).max(2000).optional(),
+});
+
+const shareClickSchema = z.object({
+  // The customer's share mechanism. Enum, not free text: the sink stores
+  // this verbatim and open strings would fragment the breakdown.
+  channel: z.enum(["native", "clipboard"]),
 });
 
 function serializePhotoPage(page: { nextCursor: string | null; hasMore: boolean }, limit: number) {
@@ -1209,6 +1216,50 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       ),
       pagination: serializePhotoPage(page, parsed.data.limit),
     });
+  }) as unknown as import("express").RequestHandler);
+
+  /**
+   * Record a gallery share click (the customer Share button). Same signed
+   * token gate as the photo list; the gallery must still be published.
+   * Responds 200 (not 204 — the shared fetch client cannot parse empty
+   * bodies) BEFORE emitting, so outages never break the share action.
+   * Clients send once per gesture with no retry: every stored event counts.
+   */
+  router.post("/public/galleries/:slug/share", (async (req: Request, res: Response) => {
+    const parsed = shareClickSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid share channel" });
+      return;
+    }
+    const slug = String(req.params.slug);
+    const token = String(req.query.st ?? "");
+    if (!verifyGalleryAccessToken(env, slug, token)) {
+      res.status(403).json({ error: "This gallery session has expired. Enter the PIN again." });
+      return;
+    }
+    const gallery = await getPublishedGalleryBySlug(env, slug);
+    if (!gallery) {
+      res.status(404).json({ error: "Gallery not found" });
+      return;
+    }
+    const visitorId = parseVisitorId(req.headers["x-visitor-id"]);
+    const correlationId =
+      typeof req.query.c === "string" && req.query.c.length >= 1 && req.query.c.length <= 200
+        ? req.query.c
+        : mintCorrelationId();
+    const trafficSource = normalizeTrafficSource(req.headers.referer, req.query as Record<string, unknown>);
+    res.json({ ok: true });
+    void publishAnalyticsEvent(
+      env,
+      makeGalleryShared({
+        galleryId: gallery.id,
+        workspaceId: gallery.workspace_id,
+        visitorId,
+        correlationId,
+        trafficSource,
+        channel: parsed.data.channel,
+      })
+    );
   }) as unknown as import("express").RequestHandler);
 
   /**
