@@ -1,0 +1,50 @@
+{
+  "name": "reco-baseline-synthetic",
+  "version": 1,
+  "description": "Fixed synthetic scenarios for the deterministic recommendation baseline (Phase 10). Signals are hand-built final values (post-window, post-bot-filter), so the pure scorer can be evaluated offline and byte-reproducibly. Golden orderings encode the scorer's full contract: pins dominate, popularity is capped, capture bursts group, ties fall back to recency then photo id. holdout_picks simulate the photos an admin actually selected for a gallery; precision@k against them is the offline relevance check. No real customer data is used anywhere in this dataset.",
+  "cases": [
+    {
+      "id": "mixed-signals",
+      "description": "One event with pins, popular photos, a 3-photo capture burst, and cold photos. Golden top-8: two pins (newest first), popularity descending, then the burst (newest first), then the single low-engagement photo. holdout_picks = the admin's plausible selection; top-6 precision = 5/6 = 0.833.",
+      "signals": [
+        { "photo_id": "p1", "uploaded_by": "member-a", "uploaded_at": "2026-10-01T09:00:00.000Z", "views": 0, "downloads": 0, "pinned": true },
+        { "photo_id": "p2", "uploaded_by": "member-b", "uploaded_at": "2026-09-20T09:00:00.000Z", "views": 0, "downloads": 0, "pinned": true },
+        { "photo_id": "p3", "uploaded_by": "member-a", "uploaded_at": "2026-10-10T10:00:00.000Z", "views": 40, "downloads": 0, "pinned": false },
+        { "photo_id": "p4", "uploaded_by": "member-b", "uploaded_at": "2026-10-11T10:00:00.000Z", "views": 10, "downloads": 5, "pinned": false },
+        { "photo_id": "p5", "uploaded_by": "member-c", "uploaded_at": "2026-10-12T10:00:00.000Z", "views": 0, "downloads": 0, "pinned": false },
+        { "photo_id": "p6", "uploaded_by": "member-c", "uploaded_at": "2026-10-12T10:01:00.000Z", "views": 0, "downloads": 0, "pinned": false },
+        { "photo_id": "p7", "uploaded_by": "member-c", "uploaded_at": "2026-10-12T10:02:00.000Z", "views": 0, "downloads": 0, "pinned": false },
+        { "photo_id": "p8", "uploaded_by": "member-d", "uploaded_at": "2026-10-05T10:00:00.000Z", "views": 1, "downloads": 0, "pinned": false },
+        { "photo_id": "p9", "uploaded_by": "member-b", "uploaded_at": "2026-10-03T10:00:00.000Z", "views": 0, "downloads": 0, "pinned": false },
+        { "photo_id": "p10", "uploaded_by": "member-d", "uploaded_at": "2026-10-02T10:00:00.000Z", "views": 0, "downloads": 0, "pinned": false },
+        { "photo_id": "p11", "uploaded_by": "member-a", "uploaded_at": "2026-09-25T10:00:00.000Z", "views": 0, "downloads": 0, "pinned": false },
+        { "photo_id": "p12", "uploaded_by": "member-c", "uploaded_at": "2026-09-15T10:00:00.000Z", "views": 0, "downloads": 0, "pinned": false }
+      ],
+      "expected_top": ["p1", "p2", "p3", "p4", "p7", "p6", "p5", "p8"],
+      "holdout_picks": ["p1", "p2", "p3", "p4", "p5", "p6"]
+    },
+    {
+      "id": "cold-start",
+      "description": "A brand-new event with zero engagement, no pins, and no capture bursts: the fallback is purely newest-first, every reason is 'recent'. holdout_picks = all five, precision@5 = 1.0.",
+      "signals": [
+        { "photo_id": "c1", "uploaded_by": "member-a", "uploaded_at": "2026-10-14T10:00:00.000Z", "views": 0, "downloads": 0, "pinned": false },
+        { "photo_id": "c2", "uploaded_by": "member-b", "uploaded_at": "2026-10-13T10:00:00.000Z", "views": 0, "downloads": 0, "pinned": false },
+        { "photo_id": "c3", "uploaded_by": "member-a", "uploaded_at": "2026-10-12T10:00:00.000Z", "views": 0, "downloads": 0, "pinned": false },
+        { "photo_id": "c4", "uploaded_by": "member-c", "uploaded_at": "2026-10-11T10:00:00.000Z", "views": 0, "downloads": 0, "pinned": false },
+        { "photo_id": "c5", "uploaded_by": "member-a", "uploaded_at": "2026-10-10T10:00:00.000Z", "views": 0, "downloads": 0, "pinned": false }
+      ],
+      "expected_top": ["c1", "c2", "c3", "c4", "c5"],
+      "holdout_picks": ["c1", "c2", "c3", "c4", "c5"]
+    },
+    {
+      "id": "pin-dominates-popularity",
+      "description": "An old, cold pinned photo must outrank a photo with massive engagement (which also exercises the popularity cap: 500 + 2x100 would be 700 uncapped, 200 with the cap). holdout_picks = both; precision@2 = 1.0.",
+      "signals": [
+        { "photo_id": "d1", "uploaded_by": "member-a", "uploaded_at": "2026-09-01T10:00:00.000Z", "views": 0, "downloads": 0, "pinned": true },
+        { "photo_id": "d2", "uploaded_by": "member-b", "uploaded_at": "2026-10-14T10:00:00.000Z", "views": 500, "downloads": 100, "pinned": false }
+      ],
+      "expected_top": ["d1", "d2"],
+      "holdout_picks": ["d1", "d2"]
+    }
+  ]
+}
