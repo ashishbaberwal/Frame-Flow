@@ -78,12 +78,16 @@ async function insertAnalyticsEvent(
       ? event.photoCount
       : null;
   const channel = event.eventType === "GalleryShared" ? event.channel : null;
+  // Absent on pre-Phase-7 producers / legacy replays — stored as NULL and
+  // treated as unclassified (ranking-eligible) by readers.
+  const clientClass = event.clientClass ?? null;
   const result = await client.query(
     `INSERT INTO analytics_event_log
        (event_id, event_type, schema_version, occurred_at, gallery_id,
         workspace_id, visitor_id, correlation_id, traffic_source,
-        traffic_medium, traffic_campaign, photo_id, photo_count, channel, raw)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb)
+        traffic_medium, traffic_campaign, photo_id, photo_count, channel,
+        client_class, raw)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
      ON CONFLICT (event_id) DO NOTHING`,
     [
       event.eventId,
@@ -100,6 +104,7 @@ async function insertAnalyticsEvent(
       photoId,
       photoCount,
       channel,
+      clientClass,
       JSON.stringify(event),
     ]
   );

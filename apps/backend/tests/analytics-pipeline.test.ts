@@ -164,6 +164,24 @@ describeIf(hasDb)("Analytics pipeline", () => {
     expect(rows.rows[0]!.photo_id).toBe(PHOTO_ID);
   });
 
+  it("persists client_class, and unclassified events store NULL", async () => {
+    // PhotoViewed (not GalleryViewed) so the aggregates tests below keep
+    // their own view counts untouched.
+    const botView = makePhotoViewed({ ...base(), photoId: PHOTO_ID, clientClass: "bot" });
+    expect(await processAnalyticsRecord(env, botView)).toBe("stored");
+    // Legacy producers (and pre-migration rows) omit the field entirely.
+    const legacyView = makePhotoViewed({ ...base(), photoId: PHOTO_ID });
+    expect(await processAnalyticsRecord(env, legacyView)).toBe("stored");
+
+    const rows = await getPool(env).query<{ event_id: string; client_class: string | null }>(
+      "SELECT event_id, client_class FROM analytics_event_log WHERE event_id = ANY($1::text[])",
+      [[botView.eventId, legacyView.eventId]]
+    );
+    const byId = new Map(rows.rows.map((r) => [r.event_id, r.client_class]));
+    expect(byId.get(botView.eventId)).toBe("bot");
+    expect(byId.get(legacyView.eventId)).toBeNull();
+  });
+
   it("consumer aggregates a GalleryViewed exactly once", async () => {
     const event = makeGalleryViewed({
       ...base(),

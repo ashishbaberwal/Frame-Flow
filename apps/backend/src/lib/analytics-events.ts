@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
+import { CLIENT_CLASSES, type ClientClass } from "./client-signals.js";
+
+export type { ClientClass } from "./client-signals.js";
+
 // ---------------------------------------------------------------------------
 // Analytics event contracts (Phase 4), schema version 1.
 //
@@ -57,6 +61,10 @@ const eventBaseSchema = z.object({
   // propagated through minted photo URLs.
   correlationId: z.string().min(1).max(200),
   trafficSource: trafficSourceSchema,
+  // Transparent rule-based client classification (Phase 7). Optional and
+  // additive within v1: producers that predate it simply omit the field, and
+  // consumers must treat absence as "unclassified" (ranking-eligible).
+  clientClass: z.enum(CLIENT_CLASSES).optional(),
 });
 
 const galleryViewedSchema = eventBaseSchema.extend({
@@ -101,6 +109,8 @@ type NewEventInput = {
   visitorId: string | null;
   correlationId: string;
   trafficSource: TrafficSource;
+  /** Optional transparent client classification — see client-signals.ts. */
+  clientClass?: ClientClass;
 };
 
 function baseFields(input: NewEventInput) {
@@ -113,6 +123,7 @@ function baseFields(input: NewEventInput) {
     visitorId: input.visitorId,
     correlationId: input.correlationId,
     trafficSource: input.trafficSource,
+    ...(input.clientClass ? { clientClass: input.clientClass } : {}),
   };
 }
 
