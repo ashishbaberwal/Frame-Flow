@@ -95,7 +95,9 @@ import {
   readPhotoBytes,
   uploadPhoto,
 } from "../lib/storage.js";
-import { clearFailures, isRateLimited, recordFailure } from "../lib/rate-limit.js";
+import { getRateLimiter } from "../lib/rate-limit.js";
+import { classifyClient } from "../lib/client-signals.js";
+import { createRateLimitMiddleware } from "../middleware/rate-limit.js";
 
 export interface CreateRouterOptions {
   env: Env;
@@ -254,6 +256,42 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
   const router = Router();
 
   // ------------------------------------------------------------------
+  // Distributed rate limiting (Phase 7). One limiter per process; Redis
+  // makes the budgets shared across instances, and degradation policy is
+  // owned by the limiter (see lib/rate-limit.ts). Verified identity is
+  // available here because app-level requireAuth ran before this router;
+  // client-supplied ids are never used as keys.
+  // ------------------------------------------------------------------
+  const limiter = getRateLimiter(env);
+  const limitProvision = createRateLimitMiddleware({
+    limiter,
+    cls: "provision",
+    key: (req) => `ip:${req.ip ?? "unknown"}`,
+  });
+  const limitPublicRead = createRateLimitMiddleware({
+    limiter,
+    cls: "public-read",
+    key: (req) => `ip:${req.ip ?? "unknown"}`,
+  });
+  const limitUpload = createRateLimitMiddleware({
+    limiter,
+    cls: "upload",
+    key: (req) => {
+      const auth = (req as AuthedRequest).auth;
+      return auth ? `user:${auth.userId}` : `ip:${req.ip ?? "unknown"}`;
+    },
+    errorMessage: "Too many uploads. Please wait a few minutes and try again.",
+  });
+  const limitAdmin = createRateLimitMiddleware({
+    limiter,
+    cls: "admin",
+    key: (req) => {
+      const auth = (req as AuthedRequest).auth;
+      return auth ? `user:${auth.userId}` : `ip:${req.ip ?? "unknown"}`;
+    },
+  });
+
+  // ------------------------------------------------------------------
   // Health & identity
   // ------------------------------------------------------------------
 
@@ -266,7 +304,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     res.json({ status: "ok" });
   });
 
-  router.get("/me", (async (req: Request, res: Response) => {
+  router.get("/me", limitProvision, (async (req: Request, res: Response) => {
     const auth = (req as AuthedRequest).auth;
     if (!auth) {
       res.status(401).json({ error: "Unauthorized" });
@@ -320,7 +358,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * Range uniques are exact distinct-visitor counts, never summed daily
    * uniques. Customer gallery endpoints are untouched.
    */
-  router.get("/analytics/overview", requireRole(env, "ADMIN"), (async (
+  router.get("/analytics/overview", limitAdmin, requireRole(env, "ADMIN"), (async (
     req: Request,
     res: Response
   ) => {
@@ -339,7 +377,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * admin's workspace through its event — otherwise 404, never a leak.
    * Days with no views are zero-filled so charts render continuously.
    */
-  router.get("/analytics/galleries/:galleryId", requireRole(env, "ADMIN"), (async (
+  router.get("/analytics/galleries/:galleryId", limitAdmin, requireRole(env, "ADMIN"), (async (
     req: Request,
     res: Response
   ) => {
@@ -372,7 +410,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * team members see only their assigned events, and people-counts are
    * withheld (null) so the client can hide those cards.
    */
-  router.get("/stats", (async (req: Request, res: Response) => {    const user = await resolveAppUser(env, req);
+  router.get("/stats", limitAdmin, (async (req: Request, res: Response) => {    const user = await resolveAppUser(env, req);
     const memberScope = user.role === "ADMIN" ? undefined : user.id;
     const [stats, uploadsPerDay, activity] = await Promise.all([
       getDashboardStats(env, user.workspace_id, memberScope),
@@ -417,7 +455,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * The invitation stamps role:'TEAM_MEMBER' into the invitee's Clerk
    * publicMetadata so they provision into this workspace as TEAM_MEMBER.
    */
-  router.post("/team-members/invite", requireRole(env, "ADMIN"), (async (
+  router.post("/team-members/invite", limitAdmin, requireRole(env, "ADMIN"), (async (
     req: Request,
     res: Response
   ) => {
@@ -499,7 +537,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * change their own role, the target must be in the same workspace, and the
    * last remaining ADMIN of the workspace can never be demoted.
    */
-  router.patch("/team-members/:id/role", requireRole(env, "ADMIN"), (async (
+  router.patch("/team-members/:id/role", limitAdmin, requireRole(env, "ADMIN"), (async (
     req: Request,
     res: Response
   ) => {
@@ -540,7 +578,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * actor's workspace. Real users keep their Clerk account (auth remains in
    * Clerk) but lose the app row → 401 on next API call; memberships cascade.
    */
-  router.delete("/team-members/:id", requireRole(env, "ADMIN"), (async (
+  router.delete("/team-members/:id", limitAdmin, requireRole(env, "ADMIN"), (async (
     req: Request,
     res: Response
   ) => {
@@ -573,7 +611,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     res.json({ events: events.map(serializeEvent) });
   }) as unknown as import("express").RequestHandler);
 
-  router.post("/events", requireRole(env, "ADMIN"), (async (req: Request, res: Response) => {
+  router.post("/events", limitAdmin, requireRole(env, "ADMIN"), (async (req: Request, res: Response) => {
     const parsed = createEventSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid input", details: parsed.error.flatten() });
@@ -601,7 +639,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     res.json({ event: serializeEvent(event) });
   }) as unknown as import("express").RequestHandler);
 
-  router.patch("/events/:id", requireRole(env, "ADMIN"), (async (req: Request, res: Response) => {
+  router.patch("/events/:id", limitAdmin, requireRole(env, "ADMIN"), (async (req: Request, res: Response) => {
     const parsed = updateEventSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid input", details: parsed.error.flatten() });
@@ -617,7 +655,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     res.json({ event: serializeEvent(updated!) });
   }) as unknown as import("express").RequestHandler);
 
-  router.delete("/events/:id", requireRole(env, "ADMIN"), (async (req: Request, res: Response) => {
+  router.delete("/events/:id", limitAdmin, requireRole(env, "ADMIN"), (async (req: Request, res: Response) => {
     const actor = await resolveAppUser(env, req);
     const event = await getWorkspaceEvent(env, String(req.params.id), actor.workspace_id);
     if (!event) {
@@ -668,6 +706,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
 
   router.post(
     "/events/:eventId/photos",
+    limitUpload,
     photoUpload,
     multerErrorHandler,
     (async (req: Request, res: Response) => {
@@ -764,7 +803,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     });
   }) as unknown as import("express").RequestHandler);
 
-  router.delete("/photos/:photoId", requireRole(env, "ADMIN"), (async (
+  router.delete("/photos/:photoId", limitAdmin, requireRole(env, "ADMIN"), (async (
     req: Request,
     res: Response
   ) => {
@@ -798,7 +837,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * QUEUED with a fresh attempt budget, keeps READY rows untouched, and
    * triggers the background sweep. The recovery path for visible failures.
    */
-  router.post("/photos/:photoId/derivatives/retry", requireRole(env, "ADMIN"), (async (
+  router.post("/photos/:photoId/derivatives/retry", limitAdmin, requireRole(env, "ADMIN"), (async (
     req: Request,
     res: Response
   ) => {
@@ -846,7 +885,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     res.json({ members: members.map(serializeMember) });
   }) as unknown as import("express").RequestHandler);
 
-  router.post("/events/:id/team-members", requireRole(env, "ADMIN"), (async (
+  router.post("/events/:id/team-members", limitAdmin, requireRole(env, "ADMIN"), (async (
     req: Request,
     res: Response
   ) => {
@@ -875,7 +914,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     res.status(201).json({ membership: serializeMember({ ...membership, user: target }) });
   }) as unknown as import("express").RequestHandler);
 
-  router.delete("/events/:id/team-members/:userId", requireRole(env, "ADMIN"), (async (
+  router.delete("/events/:id/team-members/:userId", limitAdmin, requireRole(env, "ADMIN"), (async (
     req: Request,
     res: Response
   ) => {
@@ -907,7 +946,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * generated server-side; the slug is derived from the name and made
    * unique. Every photo ID must belong to the same event — enforced in SQL.
    */
-  router.post("/events/:id/galleries", requireRole(env, "ADMIN"), (async (
+  router.post("/events/:id/galleries", limitAdmin, requireRole(env, "ADMIN"), (async (
     req: Request,
     res: Response
   ) => {
@@ -973,7 +1012,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * Publish a gallery. Admin-only; the gallery must belong to the admin's
    * workspace (checked through its event). Publishing never modifies photos.
    */
-  router.post("/galleries/:id/publish", requireRole(env, "ADMIN"), (async (
+  router.post("/galleries/:id/publish", limitAdmin, requireRole(env, "ADMIN"), (async (
     req: Request,
     res: Response
   ) => {
@@ -1017,7 +1056,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
   }
 
   /** Set a custom PIN — the auto-generated one can always be replaced. */
-  router.patch("/galleries/:id", requireRole(env, "ADMIN"), (async (req: Request, res: Response) => {
+  router.patch("/galleries/:id", limitAdmin, requireRole(env, "ADMIN"), (async (req: Request, res: Response) => {
     const parsed = setPinSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid input", details: parsed.error.flatten() });
@@ -1031,7 +1070,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
   }) as unknown as import("express").RequestHandler);
 
   /** Regenerate: a fresh server-generated PIN replaces the current one. */
-  router.post("/galleries/:id/pin/regenerate", requireRole(env, "ADMIN"), (async (
+  router.post("/galleries/:id/pin/regenerate", limitAdmin, requireRole(env, "ADMIN"), (async (
     req: Request,
     res: Response
   ) => {
@@ -1051,7 +1090,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
   // ------------------------------------------------------------------
 
   /** Metadata only — enough to render the PIN screen, never the photos. */
-  router.get("/public/galleries/:slug", (async (req: Request, res: Response) => {
+  router.get("/public/galleries/:slug", limitPublicRead, (async (req: Request, res: Response) => {
     const gallery = await getPublishedGalleryBySlug(env, String(req.params.slug));
     if (!gallery) {
       res.status(404).json({ error: "Gallery not found" });
@@ -1101,8 +1140,20 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       return;
     }
     const slug = String(req.params.slug);
-    const key = `${slug}:${req.ip ?? "unknown"}`;
-    if (isRateLimited(key)) {
+    // Distributed brute-force guards (shared across API instances when Redis
+    // is configured — see lib/rate-limit.ts). Every attempt draws from the
+    // class budget, failed PINs ALSO fill the 5-failure window, and a
+    // successful PIN clears it. Both 429 paths carry Retry-After.
+    const clientKey = `${slug}|${req.ip ?? "unknown"}`;
+    const attempt = await limiter.consume("pin-attempt", clientKey);
+    if (!attempt.allowed) {
+      res.set("Retry-After", String(Math.max(1, Math.ceil(attempt.retryAfterMs / 1000))));
+      res.status(429).json({ error: "Too many unlock attempts. Try again shortly." });
+      return;
+    }
+    const failure = await limiter.failureWindow("pin-failure", clientKey);
+    if (failure.limited) {
+      res.set("Retry-After", String(Math.max(1, Math.ceil(failure.retryAfterMs / 1000))));
       res.status(429).json({ error: "Too many incorrect attempts. Try again in 15 minutes." });
       return;
     }
@@ -1114,11 +1165,11 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
     const given = Buffer.from(parsed.data.pin);
     const expected = Buffer.from(gallery.pin);
     if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
-      recordFailure(key);
+      await limiter.recordFailure("pin-failure", clientKey);
       res.status(403).json({ error: "Incorrect PIN. Please try again." });
       return;
     }
-    clearFailures(key);
+    await limiter.clearFailures("pin-failure", clientKey);
     const page = await listGalleryPhotosPaginated(env, gallery.id, {
       limit: pageParsed.data.limit,
       cursor: pageParsed.data.cursor,
@@ -1162,6 +1213,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
         correlationId,
         trafficSource,
         photoCount: totalCount,
+        clientClass: classifyClient(req.headers["user-agent"]),
       })
     );
   }) as unknown as import("express").RequestHandler);
@@ -1172,7 +1224,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * order. Lets customers page through large galleries without re-entering
    * the PIN. Draft galleries 404 like the rest of the public surface.
    */
-  router.get("/public/galleries/:slug/photos", (async (req: Request, res: Response) => {
+  router.get("/public/galleries/:slug/photos", limitPublicRead, (async (req: Request, res: Response) => {
     const parsed = publicPhotoPageQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid pagination parameters" });
@@ -1225,7 +1277,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * bodies) BEFORE emitting, so outages never break the share action.
    * Clients send once per gesture with no retry: every stored event counts.
    */
-  router.post("/public/galleries/:slug/share", (async (req: Request, res: Response) => {
+  router.post("/public/galleries/:slug/share", limitPublicRead, (async (req: Request, res: Response) => {
     const parsed = shareClickSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid share channel" });
@@ -1258,6 +1310,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
         correlationId,
         trafficSource,
         channel: parsed.data.channel,
+        clientClass: classifyClient(req.headers["user-agent"]),
       })
     );
   }) as unknown as import("express").RequestHandler);
@@ -1270,7 +1323,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
    * derivative instead of the original (409 while it is still processing,
    * never a half-processed byte stream).
    */
-  router.get("/public/galleries/:slug/photos/:photoId", (async (req: Request, res: Response) => {
+  router.get("/public/galleries/:slug/photos/:photoId", limitPublicRead, (async (req: Request, res: Response) => {
     const slug = String(req.params.slug);
     const token = String(req.query.st ?? "");
     if (!verifyGalleryAccessToken(env, slug, token)) {
@@ -1345,6 +1398,7 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
         visitorId: viewVisitor,
         correlationId: viewCorrelation,
         trafficSource: viewTraffic,
+        clientClass: classifyClient(req.headers["user-agent"]),
       };
       void publishAnalyticsEvent(
         env,
