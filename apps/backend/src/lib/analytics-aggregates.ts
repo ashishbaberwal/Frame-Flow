@@ -457,3 +457,88 @@ export async function getWorkspaceAnalytics(
       .sort((a, b) => b.views - a.views || a.source.localeCompare(b.source)),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Popular-gallery ranking (Phase 8, read side).
+//
+// The rank is computed directly from the raw log — never a cached score —
+// so it is reproducible: same log, same window, same order. Eligibility is
+// the documented bot policy: client_class 'bot' is excluded at read time,
+// while 'human', 'suspicious' (conservative: may be legitimate kiosks), and
+// NULL (unclassified legacy rows) all count. Order is total and
+// deterministic: views, then exact window uniques, then downloads, then
+// gallery id ascending. Draft galleries never enter the ranking — they are
+// reported as a count instead. Deleted galleries drop out with their
+// metadata while their raw events survive for history.
+// ---------------------------------------------------------------------------
+
+export type PopularRankingRange = { from: string; to: string } | { all: true };
+
+export type PopularGallery = {
+  rank: number;
+  gallery_id: string;
+  name: string;
+  slug: string;
+  views: number;
+  unique_visitors: number;
+  downloads: number;
+};
+
+export type PopularGalleries = {
+  rankings: PopularGallery[];
+  excluded_drafts: number;
+};
+
+export async function getPopularGalleries(
+  env: Env,
+  workspaceId: string,
+  range: PopularRankingRange,
+  limit: number
+): Promise<PopularGalleries> {
+  const bounded = "from" in range;
+  const rows = await getPool(env).query<{
+    gallery_id: string;
+    name: string;
+    slug: string;
+    status: string;
+    views: number;
+    unique_visitors: number;
+    downloads: number;
+  }>(
+    `SELECT e.gallery_id::text AS gallery_id,
+            g.name, g.slug, g.status,
+            COUNT(*) FILTER (WHERE e.event_type = 'GalleryViewed')::int AS views,
+            COUNT(DISTINCT CASE WHEN e.event_type = 'GalleryViewed'
+              THEN e.visitor_id END)::int AS unique_visitors,
+            COUNT(*) FILTER (WHERE e.event_type = 'PhotoDownloaded')::int AS downloads
+     FROM analytics_event_log e
+     JOIN galleries g ON g.id = e.gallery_id
+     JOIN events ev ON ev.id = g.event_id AND ev.workspace_id = $1
+     WHERE e.workspace_id = $1
+       AND e.event_type IN ('GalleryViewed', 'PhotoDownloaded')
+       AND e.client_class IS DISTINCT FROM 'bot'
+       ${
+         bounded
+           ? `AND e.occurred_at >= ($2 || 'T00:00:00Z')::timestamptz
+              AND e.occurred_at < (($3 || 'T00:00:00Z')::timestamptz + interval '1 day')`
+           : ""
+       }
+     GROUP BY e.gallery_id, g.name, g.slug, g.status
+     HAVING COUNT(*) FILTER (WHERE e.event_type = 'GalleryViewed') > 0
+     ORDER BY views DESC, unique_visitors DESC, downloads DESC, e.gallery_id ASC`,
+    bounded ? [workspaceId, range.from, range.to] : [workspaceId]
+  );
+  const published = rows.rows.filter((r) => r.status === "published");
+  return {
+    rankings: published.slice(0, limit).map((r, index) => ({
+      rank: index + 1,
+      gallery_id: r.gallery_id,
+      name: r.name,
+      slug: r.slug,
+      views: r.views,
+      unique_visitors: r.unique_visitors,
+      downloads: r.downloads,
+    })),
+    excluded_drafts: rows.rows.length - published.length,
+  };
+}
