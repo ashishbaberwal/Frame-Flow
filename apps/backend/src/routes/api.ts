@@ -11,6 +11,7 @@ import {
   createInvitation,
   deleteEvent,
   deletePhoto,
+  deleteCurationPick,
   getDashboardStats,
   getPool,
   getGalleryById,
@@ -23,6 +24,7 @@ import {
   getUserByClerkId,
   getUserById,
   getWorkspaceEvent,
+  insertCurationPick,
   insertGallery,
   insertPhoto,
   isEventMember,
@@ -74,6 +76,13 @@ import {
 } from "../lib/analytics-aggregates.js";
 import { getDerivativeQueue } from "../lib/queue.js";
 import { publishDerivativeJobs } from "../lib/derivative-jobs.js";
+import {
+  getPhotoRecommendations,
+  RECO_DEFAULT_LIMIT,
+  RECO_MAX_LIMIT,
+  RECO_POPULARITY_WINDOW_DAYS,
+  RECO_STRATEGY,
+} from "../lib/recommendations.js";
 import {
   makeGalleryShared,
   makeGalleryViewed,
@@ -150,6 +159,19 @@ const photoPageQuerySchema = z.object({
   cursor: z.string().min(1).max(2000).optional(),
   order: z.enum(["newest", "oldest"]).optional().default("newest"),
 });
+
+const recoQuerySchema = z.object({
+  limit: z
+    .string()
+    .optional()
+    .refine(
+      (v) => v === undefined || (/^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= RECO_MAX_LIMIT),
+      `limit must be an integer 1–${RECO_MAX_LIMIT}`
+    )
+    .transform((v) => (v === undefined ? RECO_DEFAULT_LIMIT : Number(v))),
+});
+
+const photoPickSchema = z.object({ photo_id: z.string().uuid() });
 
 const publicPhotoPageQuerySchema = z.object({
   st: z.string().min(1).max(2000),
@@ -921,6 +943,112 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
         last_error: d.last_error,
       })),
     });
+  }) as unknown as import("express").RequestHandler);
+
+  // ------------------------------------------------------------------
+  // Recommendation baseline (Phase 10): deterministic photo suggestions
+  // for gallery curation + workspace-scoped admin picks. ADMIN only —
+  // curation is an admin workflow. Responses contain photos of the
+  // caller's workspace and nothing else: no gallery ids, slugs, PINs or
+  // status ever appear, so private galleries cannot leak through
+  // recommendations (there is no customer-facing surface at all).
+  // ------------------------------------------------------------------
+
+  /**
+   * Ranked photo suggestions for an event (ADMIN only, workspace-scoped,
+   * 404 for events outside the workspace). Deterministic baseline — see
+   * lib/recommendations.ts for the signal model and weights. Bounded:
+   * at most RECO_CANDIDATE_CAP candidates are scored and ?limit= is
+   * validated 1–50 (default 24).
+   */
+  router.get("/events/:eventId/photo-recommendations", limitAdmin, requireRole(env, "ADMIN"), (async (
+    req: Request,
+    res: Response
+  ) => {
+    const parsed = recoQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: `Invalid query (limit must be an integer 1-${RECO_MAX_LIMIT})` });
+      return;
+    }
+    const actor = await resolveAppUser(env, req);
+    const event = await getWorkspaceEvent(env, String(req.params.eventId), actor.workspace_id);
+    if (!event) {
+      res.status(404).json({ error: "Event not found" });
+      return;
+    }
+    const { candidates, recommendations } = await getPhotoRecommendations(env, {
+      workspaceId: actor.workspace_id,
+      eventId: event.id,
+      limit: parsed.data.limit,
+    });
+    const derivativeMap = await getDerivativesForPhotos(
+      env,
+      recommendations.map((r) => r.photo.id)
+    );
+    res.json({
+      strategy: RECO_STRATEGY,
+      window_days: RECO_POPULARITY_WINDOW_DAYS,
+      candidates,
+      recommendations: recommendations.map((r) => ({
+        photo: serializePhoto(r.photo, env, derivativeMap.get(r.photo.id) ?? []),
+        score: r.score,
+        reasons: r.reasons,
+      })),
+    });
+  }) as unknown as import("express").RequestHandler);
+
+  /**
+   * Pin a photo as an admin pick (ADMIN only). The photo must belong to
+   * the event, which must belong to the admin's workspace — a pick can
+   * never cross tenants. Idempotent: 201 on first pick, 200 when the
+   * photo was already picked.
+   */
+  router.post("/events/:eventId/photo-picks", limitAdmin, requireRole(env, "ADMIN"), (async (
+    req: Request,
+    res: Response
+  ) => {
+    const parsed = photoPickSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid input" });
+      return;
+    }
+    const actor = await resolveAppUser(env, req);
+    const event = await getWorkspaceEvent(env, String(req.params.eventId), actor.workspace_id);
+    if (!event) {
+      res.status(404).json({ error: "Event not found" });
+      return;
+    }
+    const photo = await getPhotoById(env, parsed.data.photo_id);
+    if (!photo || photo.event_id !== event.id) {
+      res.status(404).json({ error: "Photo not found" });
+      return;
+    }
+    const inserted = await insertCurationPick(env, {
+      photoId: photo.id,
+      workspaceId: actor.workspace_id,
+      pickedBy: actor.id,
+    });
+    res.status(inserted ? 201 : 200).json({ photo_id: photo.id, picked: true });
+  }) as unknown as import("express").RequestHandler);
+
+  /** Remove a pick (ADMIN only, workspace-scoped). Idempotent: 204 either way. */
+  router.delete("/events/:eventId/photo-picks/:photoId", limitAdmin, requireRole(env, "ADMIN"), (async (
+    req: Request,
+    res: Response
+  ) => {
+    const actor = await resolveAppUser(env, req);
+    const event = await getWorkspaceEvent(env, String(req.params.eventId), actor.workspace_id);
+    if (!event) {
+      res.status(404).json({ error: "Event not found" });
+      return;
+    }
+    const photo = await getPhotoById(env, String(req.params.photoId));
+    if (!photo || photo.event_id !== event.id) {
+      res.status(404).json({ error: "Photo not found" });
+      return;
+    }
+    await deleteCurationPick(env, actor.workspace_id, photo.id);
+    res.status(204).send();
   }) as unknown as import("express").RequestHandler);
 
   // ------------------------------------------------------------------
