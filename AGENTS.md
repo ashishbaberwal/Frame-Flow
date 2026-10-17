@@ -63,6 +63,7 @@ bun run check-types               # tsc --noEmit everywhere
 bun run build                     # production build everywhere
 
 cd apps/backend && bun run test   # vitest for the backend
+cd apps/backend && bun run eval:reco  # deterministic recommendation scorecard (fails on regression)
 ```
 
 ### Docker
@@ -178,6 +179,20 @@ Rules:
     downloads → gallery id; bot-classified events filtered at read time
     (`client_class IS DISTINCT FROM 'bot'`), drafts excluded and reported as
     `excluded_drafts`, deleted galleries drop out (ADMIN, workspace-scoped)
+  - `GET /api/v1/events/:eventId/photo-recommendations` (`?limit=` 1–50,
+    default 24) — deterministic admin curation ranking
+    (`strategy: deterministic-baseline-v1`): pinned admin picks → capped
+    popularity (views + 2×downloads, trailing 30 days, bot-filtered) →
+    capture bursts (same uploader, ≤120 s, 3+ photos) → newest-first
+    fallback; total order (score, then newest, then photo id), so identical
+    inputs always yield identical output. Photos only — gallery material
+    never appears. Scoring lives in `src/lib/recommendations.ts`; offline
+    gate `bun run eval:reco` (golden dataset in `apps/backend/eval/`)
+    must pass after scoring changes (ADMIN, workspace-scoped)
+  - `POST /api/v1/events/:eventId/photo-picks`, `DELETE .../photo-picks/:photoId`
+    — workspace-scoped admin picks (pins) feeding the ranking; idempotent
+    (201 first / 200 repeat, 204 either way), foreign or unknown photos 404
+    (ADMIN)
   - `GET /metrics` — Prometheus exposition (NOT under `/api/v1`, no Clerk
     auth, not rate-limited). Gated by `METRICS_ENABLED` (default: on only in
     development) and an optional `METRICS_TOKEN` bearer check. Route labels

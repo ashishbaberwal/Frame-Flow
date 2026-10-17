@@ -402,6 +402,51 @@ workspace-scoped) ranks the workspace's galleries by eligible engagement:
 }
 ```
 
+### Curation recommendations
+
+`GET /api/v1/events/:eventId/photo-recommendations?limit=` (1–50, default
+24) helps admins curate an event's gallery. Admin picks are managed with
+`POST /api/v1/events/:eventId/photo-picks` and
+`DELETE /api/v1/events/:eventId/photo-picks/:photoId` (both idempotent,
+both admin-only and workspace-scoped — a pick can never cross tenants).
+The strategy is `deterministic-baseline-v1`: no ML, same photos plus the
+same analytics log always produce the same ranking.
+
+- **Signal model, highest first**: pinned admin picks → eligible popularity
+  (`views + 2 × downloads` over a trailing 30-day window, bot-classified
+  events excluded, capped) → capture bursts (same uploader, photos within
+  120 s of each other, three or more in the cluster) → newest-first
+  fallback. Reasons report which signals fired: `admin_pick`, `popular`,
+  `same_burst`, `recent`.
+- **Order is total and deterministic**: score descending, then newest
+  upload, then photo id ascending — repeated calls return the identical
+  ranking. Pins are weighted so they always outrank any amount of
+  popularity.
+- **Bounded**: at most the 1,000 most recent photos of the event are
+  scored (`candidates` in the response), popularity is one aggregate
+  query over `analytics_event_log`, and bursts are computed in memory
+  from upload metadata.
+- **Admin surface only, photos only**: the payload never contains gallery
+  material (ids, slugs, PINs, publish status), so a curation read can
+  never leak customer-facing data.
+- **Offline quality gate**: `bun run eval:reco` scores the strategy
+  against a checked-in golden dataset (`apps/backend/eval/reco-dataset.json`)
+  and exits non-zero if precision drops below the documented threshold —
+  run it after touching scoring.
+
+```json
+{
+  "strategy": "deterministic-baseline-v1",
+  "window_days": 30,
+  "candidates": 3,
+  "recommendations": [
+    { "photo": { "id": "…" }, "score": 1000, "reasons": ["admin_pick"] },
+    { "photo": { "id": "…" }, "score": 3, "reasons": ["popular"] },
+    { "photo": { "id": "…" }, "score": 0, "reasons": ["recent"] }
+  ]
+}
+```
+
 ### Rate limiting & abuse protection
 
 Distributed sliding-window limits guard every expensive or enumerable
