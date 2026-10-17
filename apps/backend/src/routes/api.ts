@@ -68,7 +68,9 @@ import {
 } from "../lib/derivatives.js";
 import {
   getGalleryAnalytics,
+  getPopularGalleries,
   getWorkspaceAnalytics,
+  type PopularRankingRange,
 } from "../lib/analytics-aggregates.js";
 import { getDerivativeQueue } from "../lib/queue.js";
 import { publishDerivativeJobs } from "../lib/derivative-jobs.js";
@@ -213,6 +215,38 @@ function parseAnalyticsRange(query: unknown):
     return { ok: false, error: "Invalid date range (max one year)" };
   }
   return { ok: true, range: { from, to } };
+}
+
+/**
+ * Parse ?from=&to= | ?all=true plus ?limit= for the popular-galleries
+ * ranking. Windowed mode reuses the analytics range rules (trailing 30 days
+ * by default, one-year cap); `all` is deliberately unbounded all-time. The
+ * two modes are mutually exclusive — asking for both is a client bug.
+ */
+function parsePopularGalleriesQuery(query: unknown):
+  | { ok: true; range: PopularRankingRange; limit: number }
+  | { ok: false; error: string } {
+  const shape = z
+    .object({
+      from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      all: z.literal("true").optional(),
+      limit: z.coerce.number().int().min(1).max(50).default(10),
+    })
+    .safeParse(query);
+  if (!shape.success) {
+    return { ok: false, error: "Invalid query (use ?from=&to= or ?all=true; ?limit= 1-50)" };
+  }
+  const { from, to, all, limit } = shape.data;
+  if (all === "true") {
+    if (from || to) {
+      return { ok: false, error: "Use either ?all=true or ?from/?to=, not both" };
+    }
+    return { ok: true, range: { all: true }, limit };
+  }
+  const parsed = parseAnalyticsRange({ from, to });
+  if (!parsed.ok) return parsed;
+  return { ok: true, range: parsed.range, limit };
 }
 
 /**
@@ -403,6 +437,29 @@ export function createApiRouter({ env }: CreateRouterOptions): Router {
       range: rangeParsed.range,
       ...data,
     });
+  }) as unknown as import("express").RequestHandler);
+
+  /**
+   * Popular galleries (ADMIN only, workspace-scoped): a deterministic
+   * ranking of published galleries by eligible engagement — views, then
+   * exact window uniques, then downloads, then gallery id. Bot-classified
+   * events never count; draft galleries are excluded from the list and
+   * reported as a count; deleted galleries drop out. Every number is a
+   * direct aggregate of the raw log over an explicit window (or all time),
+   * so the ranking is reproducible — never a cached score.
+   */
+  router.get("/analytics/popular-galleries", limitAdmin, requireRole(env, "ADMIN"), (async (
+    req: Request,
+    res: Response
+  ) => {
+    const parsed = parsePopularGalleriesQuery(req.query);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+    const user = await resolveAppUser(env, req);
+    const data = await getPopularGalleries(env, user.workspace_id, parsed.range, parsed.limit);
+    res.json({ range: parsed.range, ...data });
   }) as unknown as import("express").RequestHandler);
 
   /**
