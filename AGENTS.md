@@ -168,6 +168,14 @@ Rules:
     `GET /api/v1/public/galleries/:slug/photos/:photoId?st=` — customer surface
     (no Clerk auth; server-verified PIN, rate limited; photos proxied behind an
     HMAC-signed 12h token minted at unlock — `src/lib/gallery-tokens.ts`; drafts 404)
+  - `GET /api/v1/analytics/overview`, `GET /api/v1/analytics/galleries/:galleryId`
+    — windowed views/uniques/sources/engagement (ADMIN, workspace-scoped)
+  - `GET /api/v1/analytics/popular-galleries` — deterministic published-gallery
+    ranking (`?from=&to=` ≤1y, `?all=true` all-time, `?limit=` 1–50) straight
+    from `analytics_event_log`: eligible views → exact window uniques →
+    downloads → gallery id; bot-classified events filtered at read time
+    (`client_class IS DISTINCT FROM 'bot'`), drafts excluded and reported as
+    `excluded_drafts`, deleted galleries drop out (ADMIN, workspace-scoped)
 - Errors return `{ "error": "..." }`; internals never leak into responses.
 
 ## Frontend ↔ Backend
