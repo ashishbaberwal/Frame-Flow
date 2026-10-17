@@ -168,6 +168,7 @@ All application routes are under `/api/v1`.
 | Event assignment | `/events/:id/team-members`                  | Admin                                              |
 | Photos           | `/events/:id/photos`, `/photos/:id`         | Assigned member upload/read-own; admin full access |
 | Galleries        | `/events/:id/galleries`, `/galleries/:id/*` | Admin                                              |
+| Analytics        | `/analytics/*`                              | Admin, workspace-scoped                            |
 | Public galleries | `/public/galleries/:slug/*`                 | Public, PIN/token protected                        |
 
 Errors use a consistent response shape:
@@ -361,6 +362,44 @@ no-op, including under concurrent consumers):
 - Event volume stays bounded: one event per unlock, photo serve, download,
   or share click — no scroll/hover tracking, no new visitor data beyond
   Phase 4's pseudonymous id.
+
+### Popular galleries (ranking)
+
+`GET /api/v1/analytics/popular-galleries?from=YYYY-MM-DD&to=YYYY-MM-DD`
+(or `?all=true` for all-time; `?limit=` 1–50, default 10; admin only,
+workspace-scoped) ranks the workspace's galleries by eligible engagement:
+
+- **Order is total and deterministic**: views, then exact window uniques,
+  then downloads, then gallery id ascending — same log, same window, same
+  ranking. Every number is a direct aggregate of `analytics_event_log`
+  (covered by a partial ranking index), never a cached score, so the result
+  is reproducible and recomputable.
+- **Eligible** is the documented bot policy: `client_class = 'bot'` events
+  never count; `human`, `suspicious` (conservative — may be legitimate
+  kiosks), and `NULL` (unclassified pre-Phase-7 rows) all count.
+- **Views** are eligible `GalleryViewed` events, **uniques** are exact
+  distinct visitors over the whole window (not summed daily uniques), and
+  **downloads** are eligible `PhotoDownloaded` counts. A gallery needs at
+  least one eligible view to rank.
+- **Draft galleries never rank** — they are reported separately as
+  `excluded_drafts` (drafts that would have ranked). Published galleries
+  with no activity are absent; deleted galleries drop out while their
+  events stay in the log for history.
+- Windowed mode reuses the analytics range rules (trailing 30 days by
+  default, one-year cap). `?all=true` is deliberately unbounded: the
+  all-time read scans the raw log end to end, the one query here whose cost
+  grows with history (see Known limitations).
+
+```json
+{
+  "range": { "from": "2026-05-01", "to": "2026-05-31" },
+  "rankings": [
+    { "rank": 1, "gallery_id": "…", "name": "…", "slug": "…",
+      "views": 42, "unique_visitors": 17, "downloads": 9 }
+  ],
+  "excluded_drafts": 2
+}
+```
 
 ### Rate limiting & abuse protection
 
@@ -595,7 +634,8 @@ registration URL manually. Never put `CLERK_SECRET_KEY` in frontend code or a
 Vitest and Supertest cover authentication, role checks, workspace isolation,
 event assignment, assigned-event visibility, upload authorization, uploader
 attribution, file validation, gallery creation, publishing, PIN changes, rate
-limiting, and signed public gallery access.
+limiting, signed public gallery access, and popular-gallery ranking (order,
+windows, ties, bot filter, draft reporting, isolation).
 
 ```sh
 bun run lint
@@ -622,6 +662,10 @@ the verification pipeline on pushes to `main` and pull requests.
   photos use the signed backend proxy.
 - Photo grids page through cursor-paginated APIs and prefer thumbnail
   URLs with full-size fallback.
+- Popular-gallery all-time rankings aggregate the raw log directly; at
+  large event volumes this is the first read whose cost grows with history
+  (windowed rankings stay bounded, and a rollup optimization is the
+  natural next step if volume demands it).
 - Bulk ZIP downloads, gallery expiry, and gallery unpublish are not included.
 
 ## License
