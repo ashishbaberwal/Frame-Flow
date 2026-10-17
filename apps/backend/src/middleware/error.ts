@@ -11,15 +11,25 @@ export class HttpError extends Error {
 }
 
 /**
- * Final error handler. Logs details server-side, returns a safe message to
- * the client — internals never leak into responses.
+ * Final error handler. Logs details server-side (structured, with the
+ * request id for correlation), returns a safe message to the client —
+ * internals never leak into responses.
  */
-export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
+export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction) {
   if (err instanceof HttpError) {
     res.status(err.status).json({ error: err.message });
     return;
   }
-  console.error("Unhandled error:", err instanceof Error ? err.message : err);
+  console.error(
+    JSON.stringify({
+      scope: "http",
+      event: "unhandled-error",
+      requestId: req.id ?? null,
+      method: req.method,
+      path: req.path,
+      message: err instanceof Error ? err.message : String(err),
+    })
+  );
   res.status(500).json({ error: "Internal server error" });
 }
 

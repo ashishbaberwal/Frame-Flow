@@ -1,0 +1,12 @@
+# Grafana provisioning (dev only): the Prometheus datasource the
+# FrameFlow dashboard expects. Mounted read-only by docker-compose.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

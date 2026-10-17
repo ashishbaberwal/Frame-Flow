@@ -6,6 +6,7 @@ import {
   validateAnalyticsEvent,
   type AnalyticsEvent,
 } from "./analytics-events.js";
+import { analyticsPublishesTotal } from "./metrics.js";
 
 // ---------------------------------------------------------------------------
 // Analytics event producer (fire-and-forget).
@@ -68,10 +69,12 @@ export async function publishAnalyticsEvent(
   const checked = validateAnalyticsEvent(event);
   if (!checked.ok) {
     log("dropped-invalid", checked.error);
+    analyticsPublishesTotal.inc({ outcome: "invalid" });
     return { published: false, reason: "invalid-event" };
   }
   const active = await getProducer(env).catch((err: unknown) => {
     log("connect-failed", (err as Error).message);
+    analyticsPublishesTotal.inc({ outcome: "failed" });
     return null;
   });
   if (!active) return { published: false, reason: "kafka-unconfigured" };
@@ -87,9 +90,11 @@ export async function publishAnalyticsEvent(
       setTimeout(() => reject(new Error("Analytics publish timed out")), ANALYTICS_PUBLISH_TIMEOUT_MS);
     });
     await Promise.race([send, timeout]);
+    analyticsPublishesTotal.inc({ outcome: "published" });
     return { published: true };
   } catch (err) {
     log("publish-failed", (err as Error).message);
+    analyticsPublishesTotal.inc({ outcome: "failed" });
     return { published: false, reason: "publish-failed" };
   }
 }

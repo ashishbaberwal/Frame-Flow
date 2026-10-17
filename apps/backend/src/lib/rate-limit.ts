@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 
 import type { Env } from "../config/env.js";
+import { redisErrorsTotal } from "./metrics.js";
 
 // ---------------------------------------------------------------------------
 // Distributed rate limiting (Phase 7).
@@ -285,6 +286,7 @@ export class RateLimiter {
       return result;
     } catch (err) {
       this.redisCooldownUntil = now + REDIS_COOLDOWN_MS;
+      redisErrorsTotal.inc({ component: "rate-limit" });
       if (!this.loggedCooldown) {
         this.loggedCooldown = true;
         log(

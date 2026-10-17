@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import pg from "pg";
 
 import type { Env } from "../config/env.js";
+import { dbQueryDuration } from "./metrics.js";
 
 export type DbUser = {
   id: string;
@@ -90,8 +91,67 @@ export function getPool(env: Env): pg.Pool {
       // Don't crash the process on idle-client errors; just log.
       console.error("Unexpected PostgreSQL pool error:", err.message);
     });
+    instrumentPoolQuery(pool);
   }
   return pool;
+}
+
+/**
+ * DB latency metric (Phase 9): wrap the pool's query() once, so every
+ * statement issued through getPool(env).query lands in a duration histogram
+ * labelled by statement kind — a fixed vocabulary, never SQL text (query
+ * text would be cardinality suicide and can carry data).
+ */
+const DB_OP_KEYWORDS = new Set([
+  "select",
+  "insert",
+  "update",
+  "delete",
+  "with",
+  "begin",
+  "commit",
+  "rollback",
+  "savepoint",
+  "release",
+  "set",
+  "create",
+  "alter",
+  "drop",
+]);
+
+function dbOpLabel(input: unknown): string {
+  let text: string | undefined;
+  if (typeof input === "string") text = input;
+  else if (
+    input !== null &&
+    typeof input === "object" &&
+    typeof (input as { text?: unknown }).text === "string"
+  ) {
+    text = (input as { text: string }).text;
+  }
+  const keyword = text ? /^\s*([a-z]+)/i.exec(text)?.[1]?.toLowerCase() : undefined;
+  return keyword && DB_OP_KEYWORDS.has(keyword) ? keyword : "other";
+}
+
+function instrumentPoolQuery(pool: pg.Pool): void {
+  const original = pool.query.bind(pool) as (...args: unknown[]) => unknown;
+  pool.query = function instrumentedQuery(this: pg.Pool, ...args: unknown[]) {
+    const started = performance.now();
+    const observe = () =>
+      dbQueryDuration.observe({ op: dbOpLabel(args[0]) }, (performance.now() - started) / 1000);
+    try {
+      const result = original(...args);
+      if (result instanceof Promise) {
+        // Observe on settle; never alter the promise the caller receives
+        // (the handlers return undefined, so the derived chain resolves).
+        void result.then(observe, observe);
+      }
+      return result;
+    } catch (err) {
+      observe();
+      throw err;
+    }
+  } as pg.Pool["query"];
 }
 
 /** Closes the pool — used by graceful shutdown and tests. */
