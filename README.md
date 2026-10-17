@@ -282,6 +282,10 @@ cd apps/backend && bun run worker:analytics:watch   # consumer (separate termina
   cannot set headers). The frontend mints the visitor id into
   `localStorage` (`x-visitor-id` header); clearing site data resets it.
   Unique-visitor counts are therefore estimates, not identities.
+- Events also carry a transparent `clientClass` (`human` / `bot` /
+  `suspicious`) classified from the User-Agent. This is an analytics
+  annotation only — it never blocks traffic — and legacy rows stay NULL,
+  treated exactly like `human` for eligibility.
 - Delivery honesty: producers fire-and-forget *after* the response with a
   3s timeout — Kafka outages only log, galleries keep serving, and a crash
   between serving and emitting loses that event (accepted: aggregates are
@@ -358,6 +362,45 @@ no-op, including under concurrent consumers):
   or share click — no scroll/hover tracking, no new visitor data beyond
   Phase 4's pseudonymous id.
 
+### Rate limiting & abuse protection
+
+Distributed sliding-window limits guard every expensive or enumerable
+surface. When `REDIS_URL` is configured the windows live in Redis (atomic
+Lua scripts), so one budget is shared across all API instances — the
+correct model behind a load balancer. Without Redis (local dev, tests) the
+in-process window applies, and it is also the per-class degraded fallback
+when Redis is unreachable. Blocked requests answer `429` with
+`Retry-After`; bucket keys are SHA-256 hashes of the class and material, so
+raw IPs and user ids never reach Redis, logs, or error messages.
+
+| Class         | Limit | Window | Key       | Purpose                            |
+| ------------- | ----- | ------ | --------- | ---------------------------------- |
+| `pin-failure` | 5     | 15 min | slug + IP | PIN brute force (failure window)   |
+| `pin-attempt` | 30    | 15 min | slug + IP | unlock flood guard (all attempts)  |
+| `public-read` | 600   | 1 min  | IP        | gallery metadata / photo floods    |
+| `upload`      | 30    | 10 min | user      | upload floods                      |
+| `admin`       | 300   | 10 min | user      | admin API floods                   |
+| `provision`   | 120   | 5 min  | IP        | signup/provision floods            |
+
+- PIN semantics: every unlock attempt draws from `pin-attempt`; a wrong PIN
+  additionally fills the 5-failure `pin-failure` window; a correct PIN
+  clears it. Blocked requests never extend their own lockout, and buckets
+  are scoped per slug — one attacked gallery cannot lock another.
+- Degradation is per class, deliberately: sensitive classes (PIN, upload,
+  admin) fall back to the in-process window, so protection never silently
+  drops; non-sensitive classes (`public-read`, `provision`) fail OPEN — a
+  Redis outage must not take the customer surface down. The outage is
+  logged once (`scope: "rate-limit"`) and a 15s cooldown keeps a dead Redis
+  from adding latency to every request.
+- Client classification is reporting-only: the User-Agent is classified
+  (`human` / `bot` / `suspicious`) and stamped onto analytics events (see
+  `analytics_event_log.client_class`). It never blocks a request — the
+  limiter applies equally to bots and humans — and `bot` events are
+  excluded from popularity-ranking inputs.
+- Redis being unset in production is a deployment gap, not a design
+  choice: the in-memory fallback protects one instance only, which is why
+  CI runs the limiter suite against real Redis.
+
 ## Security model
 
 - Clerk is the only identity provider. Supabase Auth and custom JWTs are not
@@ -370,7 +413,9 @@ no-op, including under concurrent consumers):
 - Team members need an `event_team_members` row to access an event.
 - Team-member photo reads are filtered by the authenticated uploader ID.
 - Uploads accept JPEG, PNG, and WebP files with a 25 MB per-file limit.
-- Gallery PIN attempts are rate-limited per gallery and IP address.
+- Gallery PIN attempts are rate-limited per gallery and IP address —
+  distributed via Redis when configured, with per-class degraded fallbacks
+  (see Rate limiting & abuse protection).
 - Unpublished galleries are not exposed through the public API.
 - Public gallery photos use signed, time-limited backend URLs.
 - Secrets are validated at backend startup and are never committed to Git.
@@ -560,15 +605,19 @@ bun run build
 ```
 
 The database-backed integration suites require `TEST_DATABASE_URL` with the
-migrations applied. GitHub Actions provisions PostgreSQL, applies migrations,
-and runs the verification pipeline on pushes to `main` and pull requests.
+migrations applied. The Redis-backend rate-limiter tests require
+`REDIS_TEST_URL` (they skip themselves with a warning when it is unset).
+GitHub Actions provisions PostgreSQL and Redis, applies migrations, and runs
+the verification pipeline on pushes to `main` and pull requests.
 
 ## Known limitations
 
 - Production Clerk invitation emails require a verified sending domain; the
   manual pending-member flow is available without one.
 - Gallery PINs are currently stored as plaintext in PostgreSQL.
-- Rate limiting is in-memory and therefore per backend process.
+- Rate limiting is Redis-backed when `REDIS_URL` is set (shared across
+  instances) and per-process otherwise; without Redis the fallback
+  degrades per class — see Rate limiting & abuse protection.
 - Authenticated dashboard previews use Appwrite view URLs; public gallery
   photos use the signed backend proxy.
 - Photo grids page through cursor-paginated APIs and prefer thumbnail

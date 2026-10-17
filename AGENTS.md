@@ -243,12 +243,12 @@ The core loop (events → uploads → curation → publish → customer PIN view
 is live end to end. Deliberately still open — do not build ahead of the plan:
 
 - ZIP/bulk download of a whole gallery (per-photo download works today)
-- Thumbnails / Appwrite transformations in the gallery grid, pagination
 - Gallery expiry + unpublish (the publish endpoint has no reverse yet)
 - PIN hashing at rest (PINs are plaintext in `galleries.pin`; changing this
   needs a coordinated migration + deploy — ask before touching remote DBs)
-- Redis/Postgres-backed rate limiting if the API ever runs multi-instance
-  (the PIN limiter in `src/lib/rate-limit.ts` is in-memory, per process)
+- Set `REDIS_URL` in production so rate limiting is actually shared across
+  instances; without it the limiter falls back to a per-process window
+  (see README → Rate limiting & abuse protection for the degradation policy)
 - Dashboard photos still render direct Appwrite view URLs for signed-in
   users; the public gallery is fully proxied behind signed tokens. Making
   the bucket private end-to-end is the remaining hardening step.
