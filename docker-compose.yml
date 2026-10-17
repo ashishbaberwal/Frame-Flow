@@ -1,9 +1,9 @@
 name: frameflow
 
 # Local infrastructure for development and tests.
-# Phase 3 starts with Redis only (BullMQ thumbnail jobs). Kafka (analytics)
-# and Prometheus/Grafana (observability) get their own services in later
-# phases. Production uses managed equivalents — never this file.
+# Redis (BullMQ thumbnail jobs), Kafka (analytics events), and
+# Prometheus/Grafana (observability). Production uses managed equivalents —
+# never this file.
 
 services:
   redis:
@@ -52,6 +52,56 @@ services:
       timeout: 10s
       retries: 10
 
+  # Prometheus (Phase 9): scrapes the host-run API (:4000) and worker
+  # metric servers (:9464 thumbnails, :9465 analytics) over
+  # host.docker.internal. The backend and workers are NOT containerized in
+  # dev, so run them with `bun run dev` as usual.
+  # ADVERTISE note: METRICS_ENABLED defaults to on for NODE_ENV=development.
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - frameflow-prometheus:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://localhost:9090/-/healthy || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Grafana (Phase 9): provisioned with the Prometheus datasource and the
+  # FrameFlow dashboard (infra/grafana). Host port 3030 — the frontend owns
+  # 3000. Anonymous access is disabled; admin/admin is the dev default.
+  grafana:
+    image: grafana/grafana:11.6.0
+    ports:
+      - "3030:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/frameflow.json
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - frameflow-grafana:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
 volumes:
   frameflow-redis:
   frameflow-kafka:
+  frameflow-prometheus:
+  frameflow-grafana:

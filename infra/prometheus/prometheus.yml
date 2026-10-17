@@ -1,0 +1,45 @@
+# Prometheus scrape configuration for local FrameFlow development.
+#
+# Run with: docker compose up -d prometheus grafana
+# Scrapes the host-run processes (the backend binds 0.0.0.0, and worker
+# metric servers bind 0.0.0.0 on 9464/9465):
+#   - API            http://localhost:4000/metrics
+#   - thumbnail worker  http://localhost:9464/metrics
+#   - analytics worker  http://localhost:9472/metrics
+#
+# Default worker ports are overridable with METRICS_PORT (both 9464 and
+# 9472 are verified free on this machine; 9465–9467 belong to another
+# local project's exporters).
+#
+# METRICS_ENABLED is on by default in development (NODE_ENV=development),
+# so no extra env vars are needed for local dashboards. In production the
+# endpoints are opt-in and should be scraped from inside the private
+# network (or gated with METRICS_TOKEN and the authorization block below).
+#
+# Prometheus or Grafana being down never affects the API: metrics live
+# in-process and collection is push-free.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: frameflow-api
+    static_configs:
+      - targets: ["host.docker.internal:4000"]
+    # When METRICS_TOKEN is set on the backend, mirror it here (dev only —
+    # production uses network-level protection or a secrets manager):
+    # authorization:
+    #   type: Bearer
+    #   credentials: <METRICS_TOKEN>
+
+  - job_name: frameflow-thumbnail-worker
+    static_configs:
+      - targets: ["host.docker.internal:9464"]
+
+  - job_name: frameflow-analytics-worker
+    static_configs:
+      - targets: ["host.docker.internal:9472"]

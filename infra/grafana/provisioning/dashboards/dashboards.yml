@@ -1,0 +1,14 @@
+# Dashboard provider (dev only): dashboards are versioned as JSON in
+# infra/grafana/dashboards and reload automatically (see the compose mount).
+apiVersion: 1
+
+providers:
+  - name: frameflow
+    orgId: 1
+    folder: FrameFlow
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

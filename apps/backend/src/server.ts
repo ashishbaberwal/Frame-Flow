@@ -5,8 +5,16 @@ import helmet from "helmet";
 
 import { loadEnv } from "./config/env.js";
 import { closePool } from "./lib/db.js";
+import {
+  metricsEnabled,
+  metricsRegistry,
+  registerQueueMetrics,
+  verifyMetricsToken,
+} from "./lib/metrics.js";
 import { checkBucket } from "./lib/storage.js";
 import { errorHandler, notFoundHandler } from "./middleware/error.js";
+import { httpMetricsMiddleware } from "./middleware/metrics.js";
+import { requestIdMiddleware } from "./middleware/request-id.js";
 import { requireAuth } from "./middleware/auth.js";
 import { createApiRouter } from "./routes/api.js";
 
@@ -17,6 +25,10 @@ export function createApp() {
 
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
+
+  // Correlation ids first so every response (including errors) carries one.
+  app.use(requestIdMiddleware);
+  app.use(httpMetricsMiddleware);
 
   app.use(helmet());
   app.use(
@@ -29,6 +41,24 @@ export function createApp() {
   );
   app.use(compression());
   app.use(express.json({ limit: "1mb" }));
+
+  // Private metrics surface for Prometheus scraping. Off by default outside
+  // development; METRICS_TOKEN turns it into a bearer-gated endpoint. Not
+  // rate limited (a scraper is a known caller) and never under /api/v1.
+  if (metricsEnabled(env)) {
+    // Queue depth/age are collected live at scrape time when Redis is set.
+    registerQueueMetrics(env);
+    app.get("/metrics", (req: Request, res: Response) => {
+      if (env.METRICS_TOKEN && !verifyMetricsToken(req.headers.authorization, env.METRICS_TOKEN)) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      metricsRegistry
+        .metrics()
+        .then((body) => res.set("Content-Type", metricsRegistry.contentType).send(body))
+        .catch(() => res.status(500).json({ error: "Internal server error" }));
+    });
+  }
 
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok" });

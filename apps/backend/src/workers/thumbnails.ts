@@ -8,6 +8,15 @@ import {
   reconcileDerivativeJobs,
 } from "../lib/derivative-jobs.js";
 import { processDerivativeJob } from "../lib/derivatives.js";
+import {
+  bullmqJobsTotal,
+  bullmqJobRetriesTotal,
+  bullmqWorkerConcurrency,
+  derivativeJobDuration,
+  derivativeJobsTotal,
+  registerQueueMetrics,
+  startMetricsServer,
+} from "../lib/metrics.js";
 import { getDerivativeQueue, getRedisConnection, JOB_TIMEOUT_MS, RECONCILE_BATCH } from "../lib/queue.js";
 
 // ---------------------------------------------------------------------------
@@ -41,11 +50,16 @@ async function processor(env: Env, job: Job): Promise<unknown> {
     // BullMQ has no job-timeout option: race the work against the timeout so
     // a hung transform throws, retries with backoff, and never wedges a
     // concurrency slot. The PG row stays PROCESSING for the reconciler.
+    const started = performance.now();
     const outcome = await withTimeout(
       processDerivativeJob(env, data),
       JOB_TIMEOUT_MS,
       `Derivative job timed out (${data.photoId}/${data.variant})`
     );
+    // Content outcomes only — throws (timeouts, bugs, PG down) surface as
+    // BullMQ "failed" events and are counted there instead.
+    derivativeJobDuration.observe((performance.now() - started) / 1000);
+    derivativeJobsTotal.inc({ outcome: outcome.outcome });
     log("job-done", { jobId: job.id, outcome: outcome.outcome, photoId: data.photoId });
     return outcome;
   }
@@ -86,16 +100,31 @@ async function start(): Promise<void> {
     { connection, concurrency: WORKER_CONCURRENCY }
   );
 
+  bullmqWorkerConcurrency.set({ queue: queue.name }, WORKER_CONCURRENCY);
   worker.on("completed", (job) => {
+    bullmqJobsTotal.inc({ queue: queue.name, event: "completed" });
     log("completed", { jobId: job.id, name: job.name });
   });
   worker.on("failed", (job, err) => {
+    bullmqJobsTotal.inc({ queue: queue.name, event: "failed" });
+    // attemptsMade is bumped per failed attempt; if the budget is not spent
+    // yet BullMQ will retry with backoff — count those separately.
+    const attemptsMade = job?.attemptsMade ?? 0;
+    const attempts = job?.opts?.attempts ?? 1;
+    if (job && attemptsMade < attempts) {
+      bullmqJobRetriesTotal.inc({ queue: queue.name });
+    }
     // Message only — job data can carry photo ids but never secrets.
     log("failed", { jobId: job?.id, name: job?.name, error: err.message });
   });
   worker.on("error", (err) => {
     log("worker-error", { error: (err as Error).message });
   });
+
+  // Sidecar metrics server (METRICS_PORT, default 9464) — Prometheus scrapes
+  // the worker directly for processing latency, outcomes, and retries.
+  registerQueueMetrics(env);
+  startMetricsServer(env, "thumbnails", 9464);
 
   log("ready", { concurrency: WORKER_CONCURRENCY, batch: RECONCILE_BATCH });
 

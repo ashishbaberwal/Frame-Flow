@@ -4,6 +4,13 @@ import { loadEnv } from "../config/env.js";
 import { closePool } from "../lib/db.js";
 import { ANALYTICS_TOPIC_DEFAULT } from "../lib/analytics-events.js";
 import { processAnalyticsRecord } from "../lib/analytics-sink.js";
+import {
+  analyticsBatchErrorsTotal,
+  analyticsEventsTotal,
+  metricsEnabled,
+  registerConsumerLagCollector,
+  startMetricsServer,
+} from "../lib/metrics.js";
 
 // ---------------------------------------------------------------------------
 // Analytics consumer entrypoint — its own process, independent of the API:
@@ -41,10 +48,44 @@ async function start(): Promise<void> {
   const kafka = new Kafka({ clientId: "frameflow-analytics-consumer", brokers });
   const consumer = kafka.consumer({ groupId: ANALYTICS_CONSUMER_GROUP });
 
+  // Metrics (Phase 9): counters update per batch; consumer lag is fetched
+  // from the Kafka admin API at scrape time (best-effort — a stale gauge
+  // beats a lying zero). A dead admin never affects consumption.
+  let admin: ReturnType<Kafka["admin"]> | null = null;
+  if (metricsEnabled(env)) {
+    admin = kafka.admin();
+    await admin.connect().catch(() => undefined);
+    registerConsumerLagCollector(async () => {
+      if (!admin) return [];
+      const [committed, latest] = await Promise.all([
+        admin.fetchOffsets({ groupId: ANALYTICS_CONSUMER_GROUP, topics: [topic] }),
+        admin.fetchTopicOffsets(topic),
+      ]);
+      const committedByPartition = new Map<number, string>();
+      for (const entry of committed) {
+        for (const part of entry.partitions) {
+          committedByPartition.set(part.partition, String(part.offset));
+        }
+      }
+      return latest.map((part) => {
+        const high = Number(part.high);
+        const low = Number(part.low);
+        const committedOffset = committedByPartition.get(part.partition);
+        // "-1" = nothing committed yet: lag is everything retained.
+        const consumed = committedOffset === undefined || committedOffset === "-1"
+          ? low
+          : Number(committedOffset);
+        return { topic, partition: part.partition, lag: Math.max(0, high - consumed) };
+      });
+    });
+    startMetricsServer(env, "analytics", 9472);
+  }
+
   const shutdown = async (signal: string) => {
     log("shutdown", { signal });
     // Commit-safe stop: finish the in-flight batch, then leave the group.
     await consumer.disconnect().catch(() => undefined);
+    await admin?.disconnect().catch(() => undefined);
     await closePool().catch(() => undefined);
     process.exit(0);
   };
@@ -71,12 +112,14 @@ async function start(): Promise<void> {
         }
         try {
           const outcome = await processAnalyticsRecord(env, raw);
+          analyticsEventsTotal.inc({ outcome });
           if (outcome === "stored") stored += 1;
           else if (outcome === "duplicate") duplicates += 1;
           else invalid += 1;
         } catch (err) {
           // DB down mid-batch: do NOT resolve — the offset stays put and the
           // whole batch redelivers after restart. Throw to stop this batch.
+          analyticsBatchErrorsTotal.inc();
           log("batch-aborted", { error: (err as Error).message });
           throw err;
         }

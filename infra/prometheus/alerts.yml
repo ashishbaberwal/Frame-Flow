@@ -1,0 +1,70 @@
+# Alert rule EXAMPLES (Phase 9) — loaded by the dev Prometheus and
+# validated in CI-style checks; no Alertmanager is wired in development.
+# In production, route these through Alertmanager/grafana alerts and tune
+# thresholds to real traffic.
+groups:
+  - name: frameflow-api
+    rules:
+      - alert: FrameflowHighErrorRate
+        expr: |
+          sum(rate(frameflow_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(frameflow_http_requests_total[5m])), 0.001) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: FrameFlow API error rate above 5% (10m)
+
+      - alert: FrameflowSlowRequests
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(frameflow_http_request_duration_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: FrameFlow API p95 latency above 1s (10m)
+
+      - alert: FrameflowRedisErrors
+        expr: increase(frameflow_redis_errors_total[10m]) > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis failures observed while serving requests (limiter degraded)
+
+      - alert: FrameflowDatabaseSlow
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(frameflow_db_query_duration_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: PostgreSQL p95 query latency above 1s (10m)
+
+  - name: frameflow-workers
+    rules:
+      - alert: FrameflowThumbnailBacklog
+        expr: frameflow_queue_oldest_waiting_age_seconds > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Oldest waiting thumbnail job is older than 5 minutes
+
+      - alert: FrameflowDerivativeFailures
+        expr: increase(frameflow_derivative_jobs_total{outcome="failed"}[15m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Thumbnail derivations are failing content-side
+
+      - alert: FrameflowAnalyticsConsumerLag
+        expr: max by (topic) (frameflow_analytics_consumer_lag) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Analytics consumer lag above 1000 messages

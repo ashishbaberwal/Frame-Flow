@@ -37,6 +37,14 @@ const envSchema = z.object({
   KAFKA_BROKERS: z.string().min(1).max(500).optional(),
   // Override the analytics topic (default frameflow.analytics.v1).
   KAFKA_TOPIC_ANALYTICS: z.string().min(1).max(200).optional(),
+  // Prometheus metrics (Phase 9). Enabled by default in development only;
+  // production must opt in explicitly. When a token is set, /metrics and the
+  // worker metric servers require it as a bearer token.
+  METRICS_ENABLED: z.enum(["true", "false"]).optional(),
+  METRICS_TOKEN: z.string().min(16).optional(),
+  // Port for the worker metric servers (sidecar scrape). Defaults per worker:
+  // thumbnails 9464, analytics 9472.
+  METRICS_PORT: z.coerce.number().int().positive().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
