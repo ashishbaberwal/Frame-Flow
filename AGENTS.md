@@ -108,6 +108,8 @@ Backend (`apps/backend/.env.local`, see `.env.example`):
 - `CLERK_SECRET_KEY` (server-only)
 - `DATABASE_URL` (Supabase Postgres connection string)
 - `APPWRITE_ENDPOINT` / `APPWRITE_PROJECT_ID` / `APPWRITE_API_KEY` / `APPWRITE_BUCKET_ID`
+- Optional: `REDIS_URL`, `KAFKA_BROKERS`, `METRICS_ENABLED`, `METRICS_TOKEN`,
+  `METRICS_PORT` (see API Conventions → `/metrics`)
 
 Rules:
 - `.env.example` files contain **names only**, never real values.
@@ -176,6 +178,13 @@ Rules:
     downloads → gallery id; bot-classified events filtered at read time
     (`client_class IS DISTINCT FROM 'bot'`), drafts excluded and reported as
     `excluded_drafts`, deleted galleries drop out (ADMIN, workspace-scoped)
+  - `GET /metrics` — Prometheus exposition (NOT under `/api/v1`, no Clerk
+    auth, not rate-limited). Gated by `METRICS_ENABLED` (default: on only in
+    development) and an optional `METRICS_TOKEN` bearer check. Route labels
+    are always Express route patterns, never raw URLs. Worker sidecars serve
+    the same registry on 9464 (thumbnails) / 9472 (analytics), `METRICS_PORT`
+    overrides. Dev stack: `docker compose up -d prometheus grafana`
+    (Grafana :3030, dashboards in `infra/grafana/`)
 - Errors return `{ "error": "..." }`; internals never leak into responses.
 
 ## Frontend ↔ Backend

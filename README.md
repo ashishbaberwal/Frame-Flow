@@ -76,6 +76,7 @@ the six-digit PIN, browse published photos, and download individual photos.
 | Database         | Supabase PostgreSQL                  | Users, workspaces, events, assignments and metadata |
 | File storage     | Appwrite Storage                     | Photo binaries only                                 |
 | Testing          | Vitest, Supertest                    | API, authorization and workflow tests               |
+| Observability    | Prometheus, Grafana, prom-client     | Metrics, dashboards and alert examples (dev stack)  |
 | Monorepo         | Turborepo, Bun                       | Workspace scripts, dependencies and builds          |
 | Frontend hosting | Vercel                               | Next.js production deployment                       |
 | Backend hosting  | Render                               | Dockerized Express production service               |
@@ -440,6 +441,48 @@ raw IPs and user ids never reach Redis, logs, or error messages.
   choice: the in-memory fallback protects one instance only, which is why
   CI runs the limiter suite against real Redis.
 
+### Observability (Prometheus + Grafana)
+
+Every process exports Prometheus metrics via `prom-client`. Collection is
+in-process and failure-isolated: Prometheus or Grafana being down never
+affects serving, and a worker whose metrics sidecar fails to bind logs the
+error and keeps working.
+
+| Surface          | Endpoint                         | Notes                                   |
+| ---------------- | -------------------------------- | --------------------------------------- |
+| API              | `GET /metrics` on port 4000      | infra surface — no Clerk auth (see gate) |
+| Thumbnail worker | `http://localhost:9464/metrics`  | sidecar; `METRICS_PORT` overrides       |
+| Analytics worker | `http://localhost:9472/metrics`  | sidecar; `METRICS_PORT` overrides       |
+
+Exposure policy: enabled by default only when `NODE_ENV=development`;
+production opts in with `METRICS_ENABLED=true`. When `METRICS_TOKEN` is set,
+the API route and the worker sidecars require `Authorization: Bearer
+<token>` (constant-time compare); without it, keep the ports off the public
+internet.
+
+What is exported: HTTP request counts (route pattern, method, status) and
+latency histograms; PostgreSQL query latency by statement kind; BullMQ queue
+depth, oldest-waiting age, worker concurrency, job completion/failure and
+retries; derivative job outcomes and durations; Kafka consumer lag per
+partition; analytics ingest outcomes (stored / duplicate / invalid) and
+batch errors; Redis fallback errors; plus the default process metrics.
+Labels are strictly bounded — route **patterns** (never raw URLs), fixed
+outcome enums, topic/partition — so series count cannot grow with traffic;
+requests that match no route collapse into `route="unmatched"`.
+
+Local stack:
+
+```sh
+docker compose up -d prometheus grafana   # Grafana at http://localhost:3030 (admin/admin)
+```
+
+Prometheus scrapes the host-run API and workers every 15s
+(`infra/prometheus/prometheus.yml`) and loads example alert rules
+(`infra/prometheus/alerts.yml`) that are validated with `promtool`. Grafana
+comes provisioned with the datasource and the FrameFlow dashboard
+(`infra/grafana/`): request rate/errors/latency, DB latency, queue health,
+worker outcomes, consumer lag, and analytics ingest.
+
 ## Security model
 
 - Clerk is the only identity provider. Supabase Auth and custom JWTs are not
@@ -467,6 +510,7 @@ raw IPs and user ids never reach Redis, logs, or error messages.
 │   ├── frontend/              # Next.js application
 │   └── backend/               # Express API and Dockerfile
 ├── packages/                  # Shared workspace configuration
+├── infra/                     # Prometheus + Grafana provisioning (dev)
 ├── supabase/migrations/       # Versioned PostgreSQL migrations
 ├── .github/workflows/ci.yml   # GitHub Actions checks
 ├── turbo.json
@@ -494,7 +538,9 @@ bun run dev --filter=backend
 ```
 
 The frontend runs on `http://localhost:3000`; the backend runs on
-`http://localhost:4000`.
+`http://localhost:4000`. `docker compose up -d` brings up the optional
+local infrastructure: Redis, Kafka, and the Prometheus/Grafana
+observability stack (see Observability).
 
 Useful commands:
 
@@ -540,6 +586,12 @@ PORT=4000
 `DATABASE_SSL_CA` is required in production for a remote PostgreSQL database.
 `GALLERY_TOKEN_SECRET` should be a separate random secret in production. Real
 values must never be committed.
+
+Optional observability variables (defaults suit local development — see
+Observability): `METRICS_ENABLED=true` turns the endpoints on
+(default: on only when `NODE_ENV=development`), `METRICS_TOKEN` gates them
+behind `Authorization: Bearer <token>`, and `METRICS_PORT` overrides a
+worker sidecar port.
 
 ## Production deployment
 
@@ -634,8 +686,9 @@ registration URL manually. Never put `CLERK_SECRET_KEY` in frontend code or a
 Vitest and Supertest cover authentication, role checks, workspace isolation,
 event assignment, assigned-event visibility, upload authorization, uploader
 attribution, file validation, gallery creation, publishing, PIN changes, rate
-limiting, signed public gallery access, and popular-gallery ranking (order,
-windows, ties, bot filter, draft reporting, isolation).
+limiting, signed public gallery access, popular-gallery ranking (order,
+windows, ties, bot filter, draft reporting, isolation), and the metrics
+surface (exposure gating, token enforcement, label-cardinality guard).
 
 ```sh
 bun run lint
@@ -666,6 +719,10 @@ the verification pipeline on pushes to `main` and pull requests.
   large event volumes this is the first read whose cost grows with history
   (windowed rankings stay bounded, and a rollup optimization is the
   natural next step if volume demands it).
+- Alert rules are dev examples (`infra/prometheus/alerts.yml`); production
+  alerting still needs an Alertmanager or Grafana contact-point setup.
+- Metrics endpoints are open unless `METRICS_TOKEN` is set — production
+  must network-gate them or configure the token.
 - Bulk ZIP downloads, gallery expiry, and gallery unpublish are not included.
 
 ## License
