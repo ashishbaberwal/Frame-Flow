@@ -777,6 +777,114 @@ export async function photosInEvent(
   return result.rowCount ?? 0;
 }
 
+// ---------------------------------------------------------------------------
+// Recommendation baseline inputs (Phase 10): candidates, popularity, picks.
+// ---------------------------------------------------------------------------
+
+/**
+ * Candidate photos for the recommender: every photo of the event, newest
+ * first, capped. The cap bounds scoring work deterministically; ordering
+ * matches the scorer's tie-break so the cap can only ever drop the
+ * oldest photos from an already-cold tail.
+ */
+export async function listEventPhotoCandidates(
+  env: Env,
+  eventId: string,
+  cap: number
+): Promise<DbPhoto[]> {
+  const result = await getPool(env).query<DbPhoto>(
+    `SELECT * FROM photos
+     WHERE event_id = $1
+     ORDER BY created_at DESC, id ASC
+     LIMIT $2`,
+    [eventId, Math.max(1, Math.floor(cap))]
+  );
+  return result.rows;
+}
+
+/**
+ * Eligible engagement per photo over a trailing window: PhotoViewed and
+ * PhotoDownloaded counts, bot-classified events excluded. Counts-only —
+ * no visitor data reaches the scorer. Suspicious counts (consistent with
+ * the Phase 8 ranking); only explicit bots are filtered.
+ */
+export async function getPhotoPopularity(
+  env: Env,
+  workspaceId: string,
+  photoIds: string[],
+  windowDays: number
+): Promise<Map<string, { views: number; downloads: number }>> {
+  const result = await getPool(env).query<{
+    photo_id: string;
+    views: number;
+    downloads: number;
+  }>(
+    `SELECT photo_id,
+            COUNT(*) FILTER (WHERE event_type = 'PhotoViewed')::int AS views,
+            COUNT(*) FILTER (WHERE event_type = 'PhotoDownloaded')::int AS downloads
+     FROM analytics_event_log
+     WHERE workspace_id = $1
+       AND photo_id = ANY($2::uuid[])
+       AND event_type IN ('PhotoViewed', 'PhotoDownloaded')
+       AND occurred_at >= now() - make_interval(days => $3)
+       AND client_class IS DISTINCT FROM 'bot'
+     GROUP BY photo_id`,
+    [workspaceId, photoIds, windowDays]
+  );
+  const popularity = new Map<string, { views: number; downloads: number }>();
+  for (const row of result.rows) {
+    popularity.set(row.photo_id, { views: row.views, downloads: row.downloads });
+  }
+  return popularity;
+}
+
+/** Which of these photos the workspace has picked (curation_picks rows). */
+export async function listCurationPickIds(
+  env: Env,
+  workspaceId: string,
+  photoIds: string[]
+): Promise<Set<string>> {
+  const result = await getPool(env).query<{ photo_id: string }>(
+    "SELECT photo_id FROM curation_picks WHERE workspace_id = $1 AND photo_id = ANY($2::uuid[])",
+    [workspaceId, photoIds]
+  );
+  return new Set(result.rows.map((r) => r.photo_id));
+}
+
+/**
+ * Idempotent pick: returns true when a row was created, false when the
+ * photo was already picked in this workspace. The workspace is resolved
+ * through the photo's event — a caller can never pick across tenants.
+ */
+export async function insertCurationPick(
+  env: Env,
+  input: { photoId: string; workspaceId: string; pickedBy: string }
+): Promise<boolean> {
+  const result = await getPool(env).query(
+    `INSERT INTO curation_picks (photo_id, workspace_id, picked_by)
+     SELECT $1::uuid, e.workspace_id, $2::uuid
+     FROM photos p
+     JOIN events e ON e.id = p.event_id
+     WHERE p.id = $1::uuid AND e.workspace_id = $3::uuid
+     ON CONFLICT (photo_id) DO NOTHING`,
+    [input.photoId, input.pickedBy, input.workspaceId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** Remove a pick (workspace-scoped). Idempotent: deleting a non-pick is a no-op. */
+export async function deleteCurationPick(
+  env: Env,
+  workspaceId: string,
+  photoId: string
+): Promise<boolean> {
+  const result = await getPool(env).query(
+    "DELETE FROM curation_picks WHERE workspace_id = $1 AND photo_id = $2",
+    [workspaceId, photoId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 /** Derive a unique URL-safe slug from a gallery name. */
 export async function uniqueGallerySlug(env: Env, name: string): Promise<string> {
   const base =
