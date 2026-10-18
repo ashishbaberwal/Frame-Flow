@@ -39,6 +39,12 @@ describeIf(hasDb)("Analytics engagement aggregation", () => {
     process.env.DATABASE_URL = dbUrl!;
     process.env.DATABASE_SSL_CA = "";
     process.env.NODE_ENV = "test";
+    process.env.CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY ?? "sk_test_placeholder";
+    process.env.APPWRITE_ENDPOINT =
+      process.env.APPWRITE_ENDPOINT ?? "https://cloud.appwrite.io/v1";
+    process.env.APPWRITE_PROJECT_ID = process.env.APPWRITE_PROJECT_ID ?? "test-project";
+    process.env.APPWRITE_API_KEY = process.env.APPWRITE_API_KEY ?? "test-key";
+    process.env.APPWRITE_BUCKET_ID = process.env.APPWRITE_BUCKET_ID ?? "test-bucket";
     resetEnvCache();
     const { loadEnv } = await import("../src/config/env.js");
     env = loadEnv();
