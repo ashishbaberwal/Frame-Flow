@@ -37,6 +37,15 @@ const envSchema = z.object({
   KAFKA_BROKERS: z.string().min(1).max(500).optional(),
   // Override the analytics topic (default frameflow.analytics.v1).
   KAFKA_TOPIC_ANALYTICS: z.string().min(1).max(200).optional(),
+  // Managed brokers (Aiven, Confluent, …) require TLS + SASL/SCRAM. Setting
+  // the credentials pair also enables TLS; local compose stays plaintext when
+  // they are unset. Mechanism defaults to scram-sha-256.
+  KAFKA_SASL_USERNAME: z.string().min(1).max(200).optional(),
+  KAFKA_SASL_PASSWORD: z.string().min(1).max(400).optional(),
+  KAFKA_SASL_MECHANISM: z.enum(["plain", "scram-sha-256", "scram-sha-512"]).optional(),
+  // Broker CA for full TLS chain verification: an inline PEM bundle (paste
+  // into a Render env var) or a path to a PEM file (mirrors DATABASE_SSL_CA).
+  KAFKA_SSL_CA: z.string().min(1).optional(),
   // Prometheus metrics (Phase 9). Enabled by default in development only;
   // production must opt in explicitly. When a token is set, /metrics and the
   // worker metric servers require it as a bearer token.
@@ -45,6 +54,23 @@ const envSchema = z.object({
   // Port for the worker metric servers (sidecar scrape). Defaults per worker:
   // thumbnails 9464, analytics 9472.
   METRICS_PORT: z.coerce.number().int().positive().optional(),
+}).superRefine((val, ctx) => {
+  const hasUser = !!val.KAFKA_SASL_USERNAME;
+  const hasPassword = !!val.KAFKA_SASL_PASSWORD;
+  if (hasUser !== hasPassword) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["KAFKA_SASL_USERNAME"],
+      message: "KAFKA_SASL_USERNAME and KAFKA_SASL_PASSWORD must be set together",
+    });
+  }
+  if (val.KAFKA_SASL_MECHANISM && !(hasUser && hasPassword)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["KAFKA_SASL_MECHANISM"],
+      message: "KAFKA_SASL_MECHANISM requires KAFKA_SASL_USERNAME and KAFKA_SASL_PASSWORD",
+    });
+  }
 });
 
 export type Env = z.infer<typeof envSchema>;
