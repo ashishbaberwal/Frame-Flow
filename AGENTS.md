@@ -111,7 +111,9 @@ Backend (`apps/backend/.env.local`, see `.env.example`):
 - `APPWRITE_ENDPOINT` / `APPWRITE_PROJECT_ID` / `APPWRITE_API_KEY` / `APPWRITE_BUCKET_ID`
 - Optional: `REDIS_URL`, `KAFKA_BROKERS` (plus `KAFKA_SASL_USERNAME` /
   `KAFKA_SASL_PASSWORD` / `KAFKA_SASL_MECHANISM` / `KAFKA_SSL_CA` for managed
-  brokers such as Aiven), `METRICS_ENABLED`, `METRICS_TOKEN`, `METRICS_PORT`
+  brokers such as Aiven), `DERIVATIVES_INLINE` (worker-less deployments:
+  Redis serves rate limiting while thumbnails stay in-process),
+  `METRICS_ENABLED`, `METRICS_TOKEN`, `METRICS_PORT`
   (see API Conventions → `/metrics`)
 
 Rules:
@@ -282,7 +284,10 @@ is live end to end. Deliberately still open — do not build ahead of the plan:
   needs a coordinated migration + deploy — ask before touching remote DBs)
 - Set `REDIS_URL` in production so rate limiting is actually shared across
   instances; without it the limiter falls back to a per-process window
-  (see README → Rate limiting & abuse protection for the degradation policy)
+  (see README → Rate limiting & abuse protection for the degradation policy).
+  Deployments without a separate worker container (e.g. free Render) must also
+  set `DERIVATIVES_INLINE=true` so thumbnails keep processing in-process
+  instead of stalling in an unconsumed BullMQ queue
 - Dashboard photos still render direct Appwrite view URLs for signed-in
   users; the public gallery is fully proxied behind signed tokens. Making
   the bucket private end-to-end is the remaining hardening step.
