@@ -356,7 +356,7 @@ describeIf(hasDb)("Analytics API", () => {
     expect(second.status).toBe(201);
     const photos = (
       await getPool(env).query<{ id: string; filename: string }>(
-        "SELECT id, filename FROM photos WHERE event_id = $1 ORDER BY filename ASC",
+        "SELECT id, filename FROM photos WHERE event_id = $1 ORDER BY filename COLLATE \"C\" ASC",
         [eventId]
       )
     ).rows;
