@@ -276,8 +276,14 @@ function parsePopularGalleriesQuery(query: unknown):
  * With Redis: publish to BullMQ (the worker processes + reconciles). Without
  * it — or when publishing fails/times out — the in-process sweep runs
  * instead. Either way the photo's rows stay QUEUED and recoverable.
+ * DERIVATIVES_INLINE=true skips the queue entirely: worker-less deployments
+ * (single container) keep Redis for rate limiting but thumbnails stay local.
  */
 async function dispatchDerivativeWork(env: Env, photoId: string): Promise<void> {
+  if (env.DERIVATIVES_INLINE === "true") {
+    kickDerivativeWorker(env);
+    return;
+  }
   try {
     const result = await publishDerivativeJobs(env, photoId);
     if (!result.published) kickDerivativeWorker(env);

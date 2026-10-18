@@ -239,7 +239,10 @@ cd apps/backend && bun run worker:thumbnails:watch   # worker (separate terminal
 Production runs the compiled worker as its own service
 (`node dist/workers/thumbnails.js`) with `REDIS_URL` pointing at managed
 Redis. Without `REDIS_URL`, everything still works: the API falls back to
-the in-process sweep.
+the in-process sweep. Deployments that cannot run a separate worker (single
+container, e.g. a free Render web service) but still want Redis for rate
+limiting set `DERIVATIVES_INLINE=true`: the API then skips the queue and
+keeps processing thumbnails in-process.
 
 - Uploads publish one job per variant (`dv:<photoId>:<variant>`) with
   3 attempts, exponential backoff (5s base), a 120s processor timeout, and

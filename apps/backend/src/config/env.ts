@@ -31,6 +31,10 @@ const envSchema = z.object({
   // Optional Redis for BullMQ thumbnail jobs. Unset → the API processes
   // derivatives with the in-process sweep; the worker refuses to boot.
   REDIS_URL: z.string().url("REDIS_URL must be a valid URL").optional(),
+  // Force in-process derivative processing even when REDIS_URL is set.
+  // For worker-less deployments (single container, e.g. Render free web
+  // services) that use Redis for rate limiting only.
+  DERIVATIVES_INLINE: z.enum(["true", "false"]).optional(),
   // Optional Kafka for analytics events (docker compose up kafka).
   // Unset → emission is a no-op and galleries serve normally.
   // KAFKA_BROKERS=localhost:9092
