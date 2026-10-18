@@ -299,6 +299,28 @@ describeIf(hasDb)("Public gallery surface", () => {
   });
 });
 
+/**
+ * The customer gallery runs on a different origin than the API (Next.js :3000
+ * vs Express :4000; frontend domain vs API domain in production). The browser
+ * preflights the unlock/photos/share calls because they carry x-visitor-id,
+ * which is outside the CORS safelist. A missing allow-list entry breaks the
+ * PIN flow in real browsers while curl and supertest keep passing.
+ */
+describe("CORS preflight for the public gallery surface", () => {
+  const app = buildApp();
+
+  it("allows the x-visitor-id header on unlock", async () => {
+    const res = await request(app)
+      .options("/api/v1/public/galleries/example-slug/unlock")
+      .set("Origin", "http://localhost:3000")
+      .set("Access-Control-Request-Method", "POST")
+      .set("Access-Control-Request-Headers", "content-type,x-visitor-id");
+    expect(res.status).toBe(204);
+    const allowed = String(res.headers["access-control-allow-headers"] ?? "").toLowerCase();
+    expect(allowed).toContain("x-visitor-id");
+  });
+});
+
 async function seedWorkspaces(env: Env) {
   const pool = getPool(env);
   for (const name of ["WS-admin@frameflow.test", "WS-admin2@frameflow.test"]) {
