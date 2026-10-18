@@ -109,8 +109,10 @@ Backend (`apps/backend/.env.local`, see `.env.example`):
 - `CLERK_SECRET_KEY` (server-only)
 - `DATABASE_URL` (Supabase Postgres connection string)
 - `APPWRITE_ENDPOINT` / `APPWRITE_PROJECT_ID` / `APPWRITE_API_KEY` / `APPWRITE_BUCKET_ID`
-- Optional: `REDIS_URL`, `KAFKA_BROKERS`, `METRICS_ENABLED`, `METRICS_TOKEN`,
-  `METRICS_PORT` (see API Conventions → `/metrics`)
+- Optional: `REDIS_URL`, `KAFKA_BROKERS` (plus `KAFKA_SASL_USERNAME` /
+  `KAFKA_SASL_PASSWORD` / `KAFKA_SASL_MECHANISM` / `KAFKA_SSL_CA` for managed
+  brokers such as Aiven), `METRICS_ENABLED`, `METRICS_TOKEN`, `METRICS_PORT`
+  (see API Conventions → `/metrics`)
 
 Rules:
 - `.env.example` files contain **names only**, never real values.
