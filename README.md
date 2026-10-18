@@ -695,6 +695,34 @@ curl https://trizen-ai.onrender.com/health
 curl https://trizen-ai.onrender.com/api/v1/health
 ```
 
+### Managed Kafka (Aiven)
+
+The analytics pipeline runs unchanged against managed brokers that speak
+SASL over TLS. Set these on the API service and on the analytics worker:
+
+```dotenv
+KAFKA_BROKERS=<host>:<port>          # Overview → Connection information (SASL tab)
+KAFKA_TOPIC_ANALYTICS=frameflow.analytics.v1
+KAFKA_SASL_USERNAME=avnadmin
+KAFKA_SASL_PASSWORD=<secret>
+KAFKA_SASL_MECHANISM=scram-sha-256   # Aiven default
+KAFKA_SSL_CA=<inline PEM or ./ca.pem>
+```
+
+- The credential pair switches the client to SASL_SSL; without it the client
+  dials plaintext (local compose). `KAFKA_SSL_CA` accepts an inline PEM value
+  (convenient in the Render dashboard) or a file path (convenient locally)
+  and enables full chain verification.
+- Create the topic before the first publish (console → Topics →
+  `frameflow.analytics.v1`), 2 partitions, keyed by gallery. Aiven's free
+  tier caps retention (~3 days) and powers off idle services, losing topic
+  data — treat it as a demo buffer, not durable storage.
+- The consumer is its own service (`node dist/workers/analytics.js`, same
+  repo and image as the API) with the same `DATABASE_*` and Kafka variables.
+  Render background workers have no free tier, so on a $0 budget the worker
+  stays undeployed: the API keeps publishing, but no aggregates reach
+  Postgres until a consumer runs somewhere.
+
 ### Frontend on Vercel
 
 Connect the repository to Vercel and deploy the `apps/frontend` Next.js app.
