@@ -3,6 +3,7 @@ import { Kafka } from "kafkajs";
 import { loadEnv } from "../config/env.js";
 import { closePool } from "../lib/db.js";
 import { ANALYTICS_TOPIC_DEFAULT } from "../lib/analytics-events.js";
+import { kafkaBrokersOf, kafkaConfigFor } from "../lib/kafka-client.js";
 import { processAnalyticsRecord } from "../lib/analytics-sink.js";
 import {
   analyticsBatchErrorsTotal,
@@ -34,10 +35,7 @@ function log(event: string, detail: Record<string, unknown> = {}): void {
 
 async function start(): Promise<void> {
   const env = loadEnv();
-  const brokers = (env.KAFKA_BROKERS ?? "")
-    .split(",")
-    .map((b) => b.trim())
-    .filter(Boolean);
+  const brokers = kafkaBrokersOf(env);
   if (brokers.length === 0) {
     console.error("KAFKA_BROKERS is required for the analytics consumer");
     process.exitCode = 1;
@@ -45,7 +43,7 @@ async function start(): Promise<void> {
   }
   const topic = env.KAFKA_TOPIC_ANALYTICS ?? ANALYTICS_TOPIC_DEFAULT;
 
-  const kafka = new Kafka({ clientId: "frameflow-analytics-consumer", brokers });
+  const kafka = new Kafka(kafkaConfigFor(env, "frameflow-analytics-consumer"));
   const consumer = kafka.consumer({ groupId: ANALYTICS_CONSUMER_GROUP });
 
   // Metrics (Phase 9): counters update per batch; consumer lag is fetched

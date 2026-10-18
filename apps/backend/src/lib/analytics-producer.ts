@@ -6,6 +6,7 @@ import {
   validateAnalyticsEvent,
   type AnalyticsEvent,
 } from "./analytics-events.js";
+import { kafkaBrokersOf, kafkaConfigFor } from "./kafka-client.js";
 import { analyticsPublishesTotal } from "./metrics.js";
 
 // ---------------------------------------------------------------------------
@@ -27,27 +28,19 @@ let kafka: Kafka | null = null;
 let producer: Producer | null = null;
 let brokersForClient: string | null = null;
 
-function brokersOf(env: Env): string[] {
-  return (env.KAFKA_BROKERS ?? "")
-    .split(",")
-    .map((b) => b.trim())
-    .filter(Boolean);
-}
-
 function log(event: string, detail: string): void {
   console.log(JSON.stringify({ scope: "analytics-producer", event, detail }));
 }
 
 async function getProducer(env: Env): Promise<Producer | null> {
-  const brokers = brokersOf(env);
+  const brokers = kafkaBrokersOf(env);
   if (brokers.length === 0) return null;
   const key = brokers.join(",");
   if (!producer || brokersForClient !== key) {
     await producer?.disconnect().catch(() => undefined);
     brokersForClient = key;
     kafka = new Kafka({
-      clientId: "frameflow-api",
-      brokers,
+      ...kafkaConfigFor(env, "frameflow-api"),
       retry: { retries: 2 },
     });
     producer = kafka.producer({ allowAutoTopicCreation: true });
