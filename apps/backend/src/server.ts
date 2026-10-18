@@ -36,7 +36,7 @@ export function createApp() {
       // Credentials stay disabled — auth is via Authorization header only.
       origin: true,
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
-      allowedHeaders: ["Content-Type", "Authorization"],
+      allowedHeaders: ["Content-Type", "Authorization", "X-Visitor-Id"],
     })
   );
   app.use(compression());
