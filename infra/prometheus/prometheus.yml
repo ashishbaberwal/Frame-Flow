@@ -2,7 +2,7 @@
 #
 # Run with: docker compose up -d prometheus grafana
 # Scrapes the host-run processes (the backend binds 0.0.0.0, and worker
-# metric servers bind 0.0.0.0 on 9464/9465):
+# metric servers bind 0.0.0.0 on 9464/9472):
 #   - API            http://localhost:4000/metrics
 #   - thumbnail worker  http://localhost:9464/metrics
 #   - analytics worker  http://localhost:9472/metrics
